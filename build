@@ -1,0 +1,3 @@
+#! /bin/sh
+
+g++-10 source/test.c -o test -Wall -Wpedantic
