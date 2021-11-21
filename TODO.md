@@ -9,4 +9,4 @@ mov TMPREG, dword ptr [rbp - B]
 mov dword ptr [rbp - A], TMPREG
 ```
 
-Also when assembler/linker fail to find a file, no error. (-d flag)
+Also when assembler/linker fails to find a file, no error. (-d flag)
