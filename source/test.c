@@ -29,9 +29,10 @@
     void LISTFN(T, ForEach)(LIST(T)* self, void (*func)(T)) \
     { for(size_t i = 0; i < self->count; ++i) func(self->data[i]); }
 
+// TODO: This is not a Hash Map, just a list with a linear search!
 #define HASHMAP(T) T##HashMap
 #define HASHMAPFN(T, NAME) T##HashMap_##NAME
-#define DECLARE_HASHMAP_TYPE(T) \
+#define DECLARE_HASHMAP_TYPE(T, K) \
     typedef struct {\
         T* data; \
         size_t count; \
@@ -50,7 +51,10 @@
     void HASHMAPFN(T, ForEachRef)(HASHMAP(T)* self, void (*func)(T*)) \
     { for(size_t i = 0; i < self->count; ++i) func(&self->data[i]); } \
     void HASHMAPFN(T, ForEach)(HASHMAP(T)* self, void (*func)(T)) \
-    { for(size_t i = 0; i < self->count; ++i) func(self->data[i]); }
+    { for(size_t i = 0; i < self->count; ++i) func(self->data[i]); } \
+    T* HASHMAPFN(T, Find)(HASHMAP(T)* self, K key, bool (*cmp)(T*, K)) \
+    { for(size_t i = 0; i < self->count; ++i) if(cmp(&self->data[i], key)) \
+      return &self->data[i]; return NULL; }
 
 
 typedef char* CStr;
@@ -316,12 +320,13 @@ AstNode_Iden *AstNode_Iden_Create(char* iden)
     return n;
 }
 
-typedef struct { AstNode node; char* name; } AstNode_Decl;
+typedef struct { AstNode node; char* name; AstNode* value; } AstNode_Decl;
 void AstNode_Decl_Free(AstNode_Decl* n) { free(n->name); ASTNODE_FREE(n); }
-AstNode_Decl *AstNode_Decl_Create(char* name)
+AstNode_Decl *AstNode_Decl_Create(char* name, AstNode* default_value)
 {
     ASTNODE_ALLOC(n, AstNode_Decl, NodeType_Decl);
     n->name = AllocStringCopy(name);
+    n->value = default_value;
     return n;
 }
 
@@ -449,8 +454,8 @@ void AstNode_FreeAny(AstNode* node)
     // case NodeType_StringLit: AstNode_StringLit_Free(node); break;
     case NodeType_Return: AstNode_Return_Free((AstNode_Return*)node); break;
     case NodeType_Block: AstNode_Block_Free((AstNode_Block*)node); break;
-    case NodeType_Decl: AstNode_Decl_Free((AstNode_Block*)node); break;
-    case NodeType_BinOp: AstNode_BinOp_Free((AstNode_Block*)node); break;
+    case NodeType_Decl: AstNode_Decl_Free((AstNode_Decl*)node); break;
+    case NodeType_BinOp: AstNode_BinOp_Free((AstNode_BinOp*)node); break;
     default: break;
     }
 }
@@ -632,9 +637,18 @@ AstNode* Parser_ParseStatement(Parser* self)
     }
     else if(Lexer_Peek(self->l)->type == TokenType_Iden && Lexer_PeekN(self->l, 2)->type == TokenType_Iden)
     {
-        Token* type_token = Lexer_Next(self->l);
+        /* Token* type_token = */ Lexer_Next(self->l);
         Token* name_token = Lexer_Next(self->l);
 
+        AstNode* default_value = NULL;
+        if(Parser__Is(self, '='))
+        {
+            Lexer_Next(self->l);
+            default_value = Parser_ParseExpression(self);
+        }
+        Parser__ExpectAndMove(self, ';');
+
+        return (AstNode*)AstNode_Decl_Create(name_token->value, default_value);
     }
     else
     {
@@ -711,29 +725,58 @@ void AstNode_Show(AstNode* node, int indent)
     }
 }
 
-typedef struct { const char* name; } Variable;
-typedef struct { const char* name; VariableHashMap vars; } Procedure;
+typedef struct { const char* name; size_t stack_offset; } Variable; DECLARE_HASHMAP_TYPE(Variable, const char*)
+typedef struct { const char* name; VariableHashMap vars; } Procedure; DECLARE_HASHMAP_TYPE(Procedure, const char*)
+
+bool CompareVariableKey(Variable* var, const char* key) { return var->name == key || strcmp(var->name, key) == 0; }
+bool CompareProcedureKey(Procedure* proc, const char* key) { return proc->name == key || strcmp(proc->name, key) == 0; }
+
+void Procedure_Initialize(Procedure* self, const char* name)
+{
+    VariableHashMap_Intialize(&self->vars);
+    self->name = name;
+}
 
 typedef struct
 {
     FILE* output;
     int indent, tab_width;
 
-    const char* pref_out_reg;
+    char* pref_out_reg;
+    bool alloc_ret_reg;
     size_t last_stack_offset;
 
     ProcedureHashMap procs;
+    Procedure* current_proc; // TODO: VariableContext stack
 } Compiler;
 
-const char* R_NON = "<none>";
-const char* R_EAX = "eax";
+char* R_NON = "<none>";
+char* R_EAX = "eax";
+
+bool Compiler_ShouldOutputToStderr = false;
 
 void Compiler_Initialize(Compiler* self, const char* filename)
 {
-    self->output = fopen(filename, "w");
+    // printf("Compiler_ShouldOutputToStderr = %s\n", Compiler_ShouldOutputToStderr ? "yes" : "no");
+    self->output = Compiler_ShouldOutputToStderr ? stderr : fopen(filename, "w");
     self->indent = 0;
     self->tab_width = 4;
     self->pref_out_reg = R_NON;
+    self->current_proc = NULL;
+    self->alloc_ret_reg = false;
+    ProcedureHashMap_Intialize(&self->procs);
+}
+
+void Compiler__Error(Compiler* self, const char* msg)
+{
+    fprintf(stderr, "\033[0;31mError:\033[0;0m %s\n", msg);
+}
+
+char* Compiler__StackOffsetString(size_t offset)
+{
+    char* m = malloc(32);
+    snprintf(m, 32, "dword ptr [rbp - %zu]", offset);
+    return m;
 }
 
 void Compiler__Indent(Compiler* self)
@@ -782,41 +825,123 @@ void Compiler_WriteHeaders(Compiler* self)
     Compiler__WriteNoIndent(self, ".intel_syntax noprefix");
 }
 
-const char* Compiler_CompileNode(Compiler* self, const AstNode* node)
+char* Compiler__PrefOutReg(Compiler* self)
+{ return StringEqual(self->pref_out_reg, R_NON) ? R_EAX : self->pref_out_reg; }
+
+bool Compiler__IsAssignable(Compiler* self, const AstNode* node) { return true; }
+
+char* Compiler_CompileNode(Compiler* self, const AstNode* node)
 {
+    // printf("\033[0;32mCompiling %s...\033[0;0m\n", NodeType_ToString(node->type));
     switch(node->type)
     {
         case NodeType_Proc:
         {
+            Procedure proc; Procedure_Initialize(&proc, ((AstNode_Proc*)node)->name);
+            ProcedureHashMap_PushRef(&self->procs, &proc);
+            self->current_proc = &self->procs.data[self->procs.count - 1];
+
             Compiler__WriteNoIndent(self, ".global _%s", ((AstNode_Proc*)node)->name);
             Compiler__Begin(self, "_%s:", ((AstNode_Proc*)node)->name);
             // TODO: Arguments.
-            Compiler_CompileNode(self, ((AstNode_Proc*)node)->body);
-            return R_NON;
+            char* tmp = Compiler_CompileNode(self, ((AstNode_Proc*)node)->body);
+            if(self->alloc_ret_reg) free(tmp);
         } break;
         case NodeType_Block:
         {
-            const char* p = R_NON;
+            char* p = R_NON;
+            self->alloc_ret_reg = false;
             for(size_t i = 0; i < ((AstNode_Block*)node)->nodes.count; ++i)
+            {
                 p = Compiler_CompileNode(self, ((AstNode_Block*)node)->nodes.data[i]);
+                if(i != ((AstNode_Block*)node)->nodes.count - 1 && self->alloc_ret_reg)
+                { self->alloc_ret_reg = false; free(p); }
+            }
+
+            self->alloc_ret_reg = self->alloc_ret_reg;
             return p;
         } break;
         case NodeType_Int:
         {
-            const char* p = self->pref_out_reg == R_NON ? R_EAX : self->pref_out_reg;
+            char* p = Compiler__PrefOutReg(self);
             Compiler__Write(self, "mov %s, %ld", p, ((AstNode_Int*)node)->value);
+
+            self->alloc_ret_reg = false;
             return p;
+        } break;
+        case NodeType_Decl:
+        {
+            if(self->current_proc == NULL) { Compiler__Error(self, "Global variables are not supported."); break; }
+            size_t v_stack_offset = self->last_stack_offset;
+            self->last_stack_offset += 4; // TODO: Variable size
+
+            VariableHashMap_PushValue(&self->current_proc->vars, (Variable){
+                /* name:   */ ((AstNode_Decl*)node)->name, // TODO: AllocStringCopy & Free
+                /* offset: */ v_stack_offset
+            });
+
+            if(((AstNode_Decl*)node)->value != NULL)
+            {
+                AstNode_Iden* i = AstNode_Iden_Create(((AstNode_Decl*)node)->name);
+                AstNode_BinOp* s = AstNode_BinOp_Create(BinOpType_Set, (AstNode*)i, ((AstNode_Decl*)node)->value);
+                char* offset_string = Compiler__StackOffsetString(v_stack_offset);
+
+                self->pref_out_reg = offset_string;
+                char* tmp = Compiler_CompileNode(self, (AstNode*)s);
+                if(self->alloc_ret_reg) free(tmp);
+
+                free(offset_string);
+                AstNode_BinOp_Free(s);
+            }
+
+            self->alloc_ret_reg = true;
+            return Compiler__StackOffsetString(v_stack_offset);
+        } break;
+        case NodeType_Iden:
+        {
+            if(self->current_proc == NULL) { Compiler__Error(self, "Global variables are not supported."); break; }
+            Variable* v = VariableHashMap_Find(&self->current_proc->vars, ((AstNode_Iden*)node)->iden, &CompareVariableKey);
+            char* p = Compiler__PrefOutReg(self);
+            char* loc = Compiler__StackOffsetString(v->stack_offset);
+            Compiler__Write(self, "mov %s, %s", p, loc);
+            self->alloc_ret_reg = false;
+            return p;
+        } break;
+        case NodeType_BinOp:
+        {
+            char* p = Compiler__PrefOutReg(self); (void)p;
+            AstNode* lhs = ((AstNode_BinOp*)node)->left;
+            AstNode* rhs = ((AstNode_BinOp*)node)->right;
+            switch(((AstNode_BinOp*)node)->type)
+            {
+                case BinOpType_Set:
+                {
+                    if(!Compiler__IsAssignable(self, lhs)) { Compiler__Error(self, "Cannot assign!"); break; }
+                    Variable* v = VariableHashMap_Find(&self->current_proc->vars, ((AstNode_Iden*)lhs)->iden, &CompareVariableKey);
+
+                    char* var_loc = Compiler__StackOffsetString(v->stack_offset);
+                    self->pref_out_reg = var_loc;
+                    char* val = Compiler_CompileNode(self, rhs);
+                    if(self->alloc_ret_reg) free(val);
+
+                    self->alloc_ret_reg = true;
+                    return var_loc;
+                } break;
+                default: Compiler__Error(self, "Binary operation is not yet implemented!");
+            }
         } break;
         case NodeType_Return:
         {
             self->pref_out_reg = R_EAX;
-            const char* p = Compiler_CompileNode(self, ((AstNode_Return*)node)->value);
-            if(p != R_EAX) Compiler__Write(self, "mov %s, %s", R_EAX, p);
+            char* p = Compiler_CompileNode(self, ((AstNode_Return*)node)->value);
+            if(!StringEqual(p, R_EAX)) Compiler__Write(self, "mov %s, %s", R_EAX, p);
+            if(self->alloc_ret_reg) free(p);
             Compiler__Write(self, "ret");
-            return R_NON;
         } break;
-        default: Compiler__Write(self, "; Did not compile node of type %s.", NodeType_ToString2(node->type)); break;
+        default: Compiler__Write(self, "# Did not compile node of type %s.", NodeType_ToString2(node->type)); break;
     }
+
+    self->alloc_ret_reg = false;
     return R_NON;
 }
 
@@ -895,12 +1020,14 @@ int Compile(const char* input_file, const char* output_file)
     // AstNode_Show(parser.root, 0);
 
     char temp_filename[] = "/tmp/test_compl_out_XXXXXX";
+    mkstemp(temp_filename);
 
     Compiler compiler;
     Compiler_Initialize(&compiler, temp_filename);
 
     Compiler_WriteHeaders(&compiler);
-    Compiler_CompileNode(&compiler, parser.root);
+    char* tmp = Compiler_CompileNode(&compiler, parser.root);
+    if(compiler.alloc_ret_reg) free(tmp);
 
     Parser_Free(&parser);
     Compiler_Free(&compiler);
@@ -917,7 +1044,14 @@ int CLI(int argc, char* argv[])
     char last_opt = 0;
     for(int i = 1; i < argc; ++i)
     {
-        if(argv[i][0] == '-') last_opt = argv[i][1];
+        if(argv[i][0] == '-')
+        {
+            last_opt = argv[i][1];
+            switch(last_opt) {
+                case 'd': Compiler_ShouldOutputToStderr = true; break;
+                default: break;
+            }
+        }
         else
         {
             switch(last_opt) {

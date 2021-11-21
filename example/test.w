@@ -1,5 +1,6 @@
 proc start()
 {
-    let a = 0;
-    return 2;
+    var a = 5;
+    var b = a;
+    return b;
 }
