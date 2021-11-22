@@ -8,6 +8,16 @@ Rewrite the compiler.
 
 ## Things that aren't working, but should
 
+bad output with
+```c
+proc main()
+{
+    int a = 5;
+    int b = a + 1;
+    return b + a;
+}
+```
+
 <!-- ```sh
 # Doesn't work!
 mov dword ptr [rbp - A], dword ptr [rbp - B]
