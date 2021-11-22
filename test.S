@@ -1,31 +1,40 @@
-	.text
-	.intel_syntax noprefix
 	.file	"test.c"
-	.globl	main                    # -- Begin function main
-	.p2align	4, 0x90
-	.type	main,@function
-main:                                   # @main
+	.intel_syntax noprefix
+	.text
+	.globl	main
+	.type	main, @function
+main:
+.LFB0:
 	.cfi_startproc
-# %bb.0:                                # %entry
+	endbr64
 	push	rbp
 	.cfi_def_cfa_offset 16
-	.cfi_offset rbp, -16
+	.cfi_offset 6, -16
 	mov	rbp, rsp
-	.cfi_def_cfa_register rbp
-	mov	dword ptr [rbp - 4], 0
-	mov	dword ptr [rbp - 8], 5
-	mov	eax, dword ptr [rbp - 8]
-	mov	dword ptr [rbp - 12], eax
-	mov	eax, dword ptr [rbp - 12]
+	.cfi_def_cfa_register 6
+	mov	DWORD PTR -4[rbp], 5
+	mov	eax, DWORD PTR -4[rbp]
 	pop	rbp
-	.cfi_def_cfa rsp, 8
+	.cfi_def_cfa 7, 8
 	ret
-.Lfunc_end0:
-	.size	main, .Lfunc_end0-main
 	.cfi_endproc
-                                        # -- End function
-
-	.ident	"clang version 7.0.0 (git@github.com:apple/swift-clang.git 5c9d04dc0697297a47b5edb0c1a581b306a42bdb) (git@github.com:apple/swift-llvm.git 34250a6eef79ee8a83c5cfb4deb1583176dcbb63)"
-	.section	".note.GNU-stack","",@progbits
-	.addrsig
-	.addrsig_sym main
+.LFE0:
+	.size	main, .-main
+	.ident	"GCC: (Ubuntu 9.3.0-17ubuntu1~20.04) 9.3.0"
+	.section	.note.GNU-stack,"",@progbits
+	.section	.note.gnu.property,"a"
+	.align 8
+	.long	 1f - 0f
+	.long	 4f - 1f
+	.long	 5
+0:
+	.string	 "GNU"
+1:
+	.align 8
+	.long	 0xc0000002
+	.long	 3f - 2f
+2:
+	.long	 0x3
+3:
+	.align 8
+4:

@@ -737,17 +737,18 @@ void Procedure_Initialize(Procedure* self, const char* name)
     self->name = name;
 }
 
-char* Register_ToString[] = { "<error>", "eax", "ebx", "ecx", "edx" };
+char* Register_ToString[] = { "<error>", "rax", "rbx", "rcx", "rdx" };
 enum Register
 {
     Register_None,
-    Register_Eax,
-    Register_Ebx,
-    Register_Ecx,
-    Register_Edx,
+    Register_Rax,
+    Register_Rbx,
+    Register_Rcx,
+    Register_Rdx,
     Register__Last
 };
 
+// TODO: IR
 
 typedef struct
 {
@@ -774,7 +775,7 @@ void Compiler_Initialize(Compiler* self, const char* filename)
     self->pref_out_reg = Register_ToString[Register_None];
     self->current_proc = NULL;
     self->alloc_ret_reg = false;
-    self->last_stack_offset = 0;
+    self->last_stack_offset = 4;
     self->ret_written = false;
     memset(self->used_regs, 0, sizeof(bool) * Register__Last);
     ProcedureHashMap_Intialize(&self->procs);
@@ -788,7 +789,7 @@ void Compiler__Error(Compiler* self, const char* msg)
 char* Compiler__StackOffsetString(size_t offset)
 {
     char* m = malloc(32);
-    snprintf(m, 32, "dword ptr [rbp - %zu]", offset);
+    snprintf(m, 32, "qword ptr [rbp - %zu]", offset);
     return m;
 }
 
@@ -798,7 +799,7 @@ void Compiler__Indent(Compiler* self)
         fputc(' ', self->output);
 }
 
-void Compiler__End(Compiler* self) { self->indent--; }
+void Compiler__End(Compiler* self) { self->indent--; fputc('\n', self->output); }
 void Compiler__Begin(Compiler* self, const char* fmt, ...)
 {
     va_list va;
@@ -836,6 +837,13 @@ void Compiler__WriteNoIndent(Compiler* self, const char* fmt, ...)
 void Compiler_WriteHeaders(Compiler* self)
 {
     Compiler__WriteNoIndent(self, ".intel_syntax noprefix");
+    Compiler__WriteNoIndent(self, ".global _start");
+    Compiler__Begin(self, "_start:");
+        Compiler__Write(self, "call _main");
+        Compiler__Write(self, "mov rdi, rax");
+        Compiler__Write(self, "mov rax, 60");
+        Compiler__Write(self, "syscall");
+    Compiler__End(self);
 }
 
 enum Register Compiler__FirstFreeReg(Compiler* self)
@@ -845,25 +853,34 @@ enum Register Compiler__FirstFreeReg(Compiler* self)
     return 0;
 }
 
-void Compiler__WriteMov(Compiler* self, const char* dst, const char* src)
+void Compiler__WriteBinInstr(Compiler* self, const char* ins, const char* dst, const char* src)
 {
     if(StringEqual(dst, src)) return;
-    if(StringStartsWith(dst, "dword ptr") && StringStartsWith(src, "dword ptr"))
+    if(StringStartsWith(dst, "qword ptr") && StringStartsWith(src, "qword ptr"))
     {
         enum Register r = Compiler__FirstFreeReg(self);
-        Compiler__Write(self, "mov %s, %s", Register_ToString[r], src);
-        Compiler__Write(self, "mov %s, %s", dst, Register_ToString[r]);
+        Compiler__Write(self, "%s %s, %s", ins, Register_ToString[r], src);
+        Compiler__Write(self, "%s %s, %s", ins, dst, Register_ToString[r]);
     }
     else
     {
-        Compiler__Write(self, "mov %s, %s", dst, src);
+        Compiler__Write(self, "%s %s, %s", ins, dst, src);
     }
 }
+
+enum Register Compiler__PrefOutRegEnum(Compiler* self)
+{
+    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
+        ? Compiler__FirstFreeReg(self)
+        : self->pref_out_reg;
+}
+
 
 char* Compiler__PrefOutReg(Compiler* self)
 {
     return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
-        ? Register_ToString[Register_Eax] : self->pref_out_reg;
+        ? Register_ToString[Compiler__FirstFreeReg(self)]
+        : self->pref_out_reg;
 }
 
 bool Compiler__IsAssignable(Compiler* self, const AstNode* node) { return true; }
@@ -884,6 +901,7 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
             // TODO: Arguments.
             Compiler__Write(self, "push rbp");
             Compiler__Write(self, "mov rbp, rsp");
+            self->pref_out_reg = Register_ToString[Register_None];
             char* tmp = Compiler_CompileNode(self, ((AstNode_Proc*)node)->body);
             if(self->alloc_ret_reg) free(tmp);
             if(!self->ret_written)
@@ -891,6 +909,7 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
                 Compiler__Write(self, "pop rbp");
                 Compiler__Write(self, "ret");
             }
+            Compiler__End(self);
         } break;
         case NodeType_Block:
         {
@@ -899,6 +918,7 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
             for(size_t i = 0; i < ((AstNode_Block*)node)->nodes.count; ++i)
             {
                 self->ret_written = false;
+                self->pref_out_reg = Register_ToString[Register_None];
                 p = Compiler_CompileNode(self, ((AstNode_Block*)node)->nodes.data[i]);
                 if(i != ((AstNode_Block*)node)->nodes.count - 1 && self->alloc_ret_reg)
                 { self->alloc_ret_reg = false; free(p); }
@@ -911,7 +931,8 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
         {
             char* p = Compiler__PrefOutReg(self);
             Compiler__Write(self, "mov %s, %ld", p, ((AstNode_Int*)node)->value);
-
+            self->used_regs[p]
+            
             self->alloc_ret_reg = false;
             return p;
         } break;
@@ -949,7 +970,7 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
             Variable* v = VariableHashMap_Find(&self->current_proc->vars, ((AstNode_Iden*)node)->iden, &CompareVariableKey);
             char* p = Compiler__PrefOutReg(self);
             char* loc = Compiler__StackOffsetString(v->stack_offset);
-            Compiler__WriteMov(self, p, loc);
+            Compiler__WriteBinInstr(self, "mov", p, loc);
             self->alloc_ret_reg = false;
             return p;
         } break;
@@ -973,14 +994,26 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
                     self->alloc_ret_reg = true;
                     return var_loc;
                 } break;
+                case BinOpType_Add:
+                {
+                    self->pref_out_reg = Register_ToString[Register_None];
+                    char* n1 = Compiler_CompileNode(self, lhs);
+                    bool al_n1 = self->alloc_ret_reg;
+
+                    self->pref_out_reg = Register_ToString[Register_None];
+                    char* n2 = Compiler_CompileNode(self, rhs);
+                    bool al_n2 = self->alloc_ret_reg;
+
+                    Compiler__WriteBinInstr(self, "add", n1, n2);
+                }
                 default: Compiler__Error(self, "Binary operation is not yet implemented!");
             }
         } break;
         case NodeType_Return:
         {
-            self->pref_out_reg = Register_ToString[Register_Eax];
+            self->pref_out_reg = Register_ToString[Register_Rax];
             char* p = Compiler_CompileNode(self, ((AstNode_Return*)node)->value);
-            Compiler__WriteMov(self, Register_ToString[Register_Eax], p);
+            Compiler__WriteBinInstr(self, "mov", Register_ToString[Register_Rax], p);
             // if(!StringEqual(p, Register_ToString[Register_Eax]))
             //     Compiler__Write(self, "mov %s, %s", );
             if(self->alloc_ret_reg) free(p);
@@ -1020,9 +1053,9 @@ int Command_Assembler(const char* input_name, const char* output_name)
 }
 
 const char* MACOS_LINKER_COMMAND =
-    "ld %s -o %s -e _start -macosx_version_min 10.13 -lSystem";
+    "ld %s -o %s -e _start -static -macosx_version_min 10.13";
 const char* LINUX_LINKER_COMMAND =
-    "ld %s -o %s -e _start";
+    "ld %s -o %s -e _start -static";
 
 #ifdef __darwin__
 #define LINKER_COMMAND_FMT MACOS_LINKER_COMMAND
