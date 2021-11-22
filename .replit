@@ -1,0 +1,2 @@
+language = "bash"
+run = "./build && ./test example/test.w -o out -d"

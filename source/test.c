@@ -737,6 +737,18 @@ void Procedure_Initialize(Procedure* self, const char* name)
     self->name = name;
 }
 
+char* Register_ToString[] = { "<error>", "eax", "ebx", "ecx", "edx" };
+enum Register
+{
+    Register_None,
+    Register_Eax,
+    Register_Ebx,
+    Register_Ecx,
+    Register_Edx,
+    Register__Last
+};
+
+
 typedef struct
 {
     FILE* output;
@@ -745,14 +757,12 @@ typedef struct
     char* pref_out_reg;
     bool alloc_ret_reg;
     size_t last_stack_offset;
+    bool used_regs[Register__Last];
+    bool ret_written;
 
     ProcedureHashMap procs;
     Procedure* current_proc; // TODO: VariableContext stack
 } Compiler;
-
-char* R_NON = "<none>";
-char* R_EAX = "eax";
-
 bool Compiler_ShouldOutputToStderr = false;
 
 void Compiler_Initialize(Compiler* self, const char* filename)
@@ -761,9 +771,12 @@ void Compiler_Initialize(Compiler* self, const char* filename)
     self->output = Compiler_ShouldOutputToStderr ? stderr : fopen(filename, "w");
     self->indent = 0;
     self->tab_width = 4;
-    self->pref_out_reg = R_NON;
+    self->pref_out_reg = Register_ToString[Register_None];
     self->current_proc = NULL;
     self->alloc_ret_reg = false;
+    self->last_stack_offset = 0;
+    self->ret_written = false;
+    memset(self->used_regs, 0, sizeof(bool) * Register__Last);
     ProcedureHashMap_Intialize(&self->procs);
 }
 
@@ -825,8 +838,33 @@ void Compiler_WriteHeaders(Compiler* self)
     Compiler__WriteNoIndent(self, ".intel_syntax noprefix");
 }
 
+enum Register Compiler__FirstFreeReg(Compiler* self)
+{
+    for(int i = 1; i < Register__Last; ++i)
+        if(!self->used_regs[i]) return i;
+    return 0;
+}
+
+void Compiler__WriteMov(Compiler* self, const char* dst, const char* src)
+{
+    if(StringEqual(dst, src)) return;
+    if(StringStartsWith(dst, "dword ptr") && StringStartsWith(src, "dword ptr"))
+    {
+        enum Register r = Compiler__FirstFreeReg(self);
+        Compiler__Write(self, "mov %s, %s", Register_ToString[r], src);
+        Compiler__Write(self, "mov %s, %s", dst, Register_ToString[r]);
+    }
+    else
+    {
+        Compiler__Write(self, "mov %s, %s", dst, src);
+    }
+}
+
 char* Compiler__PrefOutReg(Compiler* self)
-{ return StringEqual(self->pref_out_reg, R_NON) ? R_EAX : self->pref_out_reg; }
+{
+    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
+        ? Register_ToString[Register_Eax] : self->pref_out_reg;
+}
 
 bool Compiler__IsAssignable(Compiler* self, const AstNode* node) { return true; }
 
@@ -844,15 +882,23 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
             Compiler__WriteNoIndent(self, ".global _%s", ((AstNode_Proc*)node)->name);
             Compiler__Begin(self, "_%s:", ((AstNode_Proc*)node)->name);
             // TODO: Arguments.
+            Compiler__Write(self, "push rbp");
+            Compiler__Write(self, "mov rbp, rsp");
             char* tmp = Compiler_CompileNode(self, ((AstNode_Proc*)node)->body);
             if(self->alloc_ret_reg) free(tmp);
+            if(!self->ret_written)
+            {
+                Compiler__Write(self, "pop rbp");
+                Compiler__Write(self, "ret");
+            }
         } break;
         case NodeType_Block:
         {
-            char* p = R_NON;
+            char* p = Register_ToString[Register_None];
             self->alloc_ret_reg = false;
             for(size_t i = 0; i < ((AstNode_Block*)node)->nodes.count; ++i)
             {
+                self->ret_written = false;
                 p = Compiler_CompileNode(self, ((AstNode_Block*)node)->nodes.data[i]);
                 if(i != ((AstNode_Block*)node)->nodes.count - 1 && self->alloc_ret_reg)
                 { self->alloc_ret_reg = false; free(p); }
@@ -903,7 +949,7 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
             Variable* v = VariableHashMap_Find(&self->current_proc->vars, ((AstNode_Iden*)node)->iden, &CompareVariableKey);
             char* p = Compiler__PrefOutReg(self);
             char* loc = Compiler__StackOffsetString(v->stack_offset);
-            Compiler__Write(self, "mov %s, %s", p, loc);
+            Compiler__WriteMov(self, p, loc);
             self->alloc_ret_reg = false;
             return p;
         } break;
@@ -932,17 +978,21 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
         } break;
         case NodeType_Return:
         {
-            self->pref_out_reg = R_EAX;
+            self->pref_out_reg = Register_ToString[Register_Eax];
             char* p = Compiler_CompileNode(self, ((AstNode_Return*)node)->value);
-            if(!StringEqual(p, R_EAX)) Compiler__Write(self, "mov %s, %s", R_EAX, p);
+            Compiler__WriteMov(self, Register_ToString[Register_Eax], p);
+            // if(!StringEqual(p, Register_ToString[Register_Eax]))
+            //     Compiler__Write(self, "mov %s, %s", );
             if(self->alloc_ret_reg) free(p);
+            Compiler__Write(self, "pop rbp");
             Compiler__Write(self, "ret");
+            self->ret_written = true;
         } break;
         default: Compiler__Write(self, "# Did not compile node of type %s.", NodeType_ToString2(node->type)); break;
     }
 
     self->alloc_ret_reg = false;
-    return R_NON;
+    return Register_ToString[Register_None];
 }
 
 void Compiler_Free(Compiler* self)
@@ -969,9 +1019,20 @@ int Command_Assembler(const char* input_name, const char* output_name)
     return System_Format("as %s -o %s", input_name, output_name);
 }
 
+const char* MACOS_LINKER_COMMAND =
+    "ld %s -o %s -e _start -macosx_version_min 10.13 -lSystem";
+const char* LINUX_LINKER_COMMAND =
+    "ld %s -o %s -e _start";
+
+#ifdef __darwin__
+#define LINKER_COMMAND_FMT MACOS_LINKER_COMMAND
+#else
+#define LINKER_COMMAND_FMT LINUX_LINKER_COMMAND
+#endif
+
 int Command_Linker(const char* input_name, const char* output_name)
 {
-    return System_Format("ld %s -o %s -e _start -macosx_version_min 10.13 -lSystem", input_name, output_name);
+    return System_Format(LINKER_COMMAND_FMT, input_name, output_name);
 }
 
 int Build(const char* input_name, const char* output_name)
