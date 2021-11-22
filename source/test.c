@@ -5,6 +5,24 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include "util.h"
+#include "arch.h"
+
+#define WLANG_TARGET_DARWIN 0
+#define WLANG_TARGET_LINUX 1
+
+#ifndef WLANG_TARGET
+#  ifdef __APPLE__
+#    define WLANG_TARGET WLANG_TARGET_DARWIN
+#  else
+#    define WLANG_TARGET WLANG_TARGET_LINUX
+#  endif
+#endif
+
+#if WLANG_TARGET == WLANG_TARGET_DARWIN
+#  define WLANG_SYSCALL_EXIT WLANG_SYSCALL__DARWIN__EXIT
+#elif WLANG_TARGET == WLANG_TARGET_LINUX
+#  define WLANG_SYSCALL_EXIT WLANG_SYSCALL__LINUX__EXIT
+#endif
 
 #define LIST(T) T##List
 #define LISTFN(T, NAME) T##List_##NAME
@@ -748,6 +766,29 @@ enum Register
     Register__Last
 };
 
+const char* Register__32(const char* regstr)
+{
+    if(!regstr) return regstr;
+    int l = strlen(regstr);
+    if(l < 3) return NULL; // x86, no >=32bit register exists with a name less than 3 chars.
+
+    /**/ if(regstr[0] == 'r') // 64 bit register.
+    {
+        switch(regstr[1])
+        {
+        case 'a': return "eax";
+        case 'b': return "ebx";
+        case 'c': return "ecx";
+        case 'd': return "edx";
+        default: return NULL;
+        }
+    }
+    else if(regstr[0] == 'e') // 32-bit register, do nothing.
+        return regstr;
+
+    return NULL;
+}
+
 // TODO: IR
 
 typedef struct
@@ -764,12 +805,12 @@ typedef struct
     ProcedureHashMap procs;
     Procedure* current_proc; // TODO: VariableContext stack
 } Compiler;
-bool Compiler_ShouldOutputToStderr = false;
+bool Compiler_IsDebug = false;
 
 void Compiler_Initialize(Compiler* self, const char* filename)
 {
-    // printf("Compiler_ShouldOutputToStderr = %s\n", Compiler_ShouldOutputToStderr ? "yes" : "no");
-    self->output = Compiler_ShouldOutputToStderr ? stderr : fopen(filename, "w");
+    // printf("Compiler_IsDebug = %s\n", Compiler_IsDebug ? "yes" : "no");
+    self->output = Compiler_IsDebug ? stderr : fopen(filename, "w");
     self->indent = 0;
     self->tab_width = 4;
     self->pref_out_reg = Register_ToString[Register_None];
@@ -834,6 +875,20 @@ void Compiler__WriteNoIndent(Compiler* self, const char* fmt, ...)
     va_end(va);
 }
 
+// ??
+void Compiler__WriteSyscall_Exit(Compiler* self, char* retcode)
+{
+#if WLANG_TARGET == WLANG_TARGET_DARWIN
+    // if(!StringEqual(retcode, "ebx") && !StringEqual(retcode, "rbx")) Compiler__Write(self, "mov ebx, %s", Register__32(retcode));
+    Compiler__Write(self, "mov eax, 0x%x", WLANG_SYSCALL__DARWIN__EXIT);
+    Compiler__Write(self, "syscall");
+#elif WLANG_TARGET == WLANG_TARGET_LINUX
+    Compiler__WriteBinInstr(self, "mov", "rdi", retcode);
+    Compiler__Write(self, "mov eax, 0x%x", WLANG_SYSCALL__LINUX__EXIT);
+    Compiler__Write(self, "syscall");
+#endif
+}
+
 void Compiler_WriteHeaders(Compiler* self)
 {
     Compiler__WriteNoIndent(self, ".intel_syntax noprefix");
@@ -841,8 +896,7 @@ void Compiler_WriteHeaders(Compiler* self)
     Compiler__Begin(self, "_start:");
         Compiler__Write(self, "call _main");
         Compiler__Write(self, "mov rdi, rax");
-        Compiler__Write(self, "mov rax, 60");
-        Compiler__Write(self, "syscall");
+        Compiler__WriteSyscall_Exit(self, NULL);
     Compiler__End(self);
 }
 
@@ -872,7 +926,7 @@ enum Register Compiler__PrefOutRegEnum(Compiler* self)
 {
     return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
         ? Compiler__FirstFreeReg(self)
-        : self->pref_out_reg;
+        : Register_None;
 }
 
 
@@ -931,8 +985,6 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
         {
             char* p = Compiler__PrefOutReg(self);
             Compiler__Write(self, "mov %s, %ld", p, ((AstNode_Int*)node)->value);
-            self->used_regs[p]
-            
             self->alloc_ret_reg = false;
             return p;
         } break;
@@ -940,7 +992,7 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
         {
             if(self->current_proc == NULL) { Compiler__Error(self, "Global variables are not supported."); break; }
             size_t v_stack_offset = self->last_stack_offset;
-            self->last_stack_offset += 4; // TODO: Variable size
+            self->last_stack_offset += 8; // TODO: Variable size
 
             VariableHashMap_PushValue(&self->current_proc->vars, (Variable){
                 /* name:   */ ((AstNode_Decl*)node)->name, // TODO: AllocStringCopy & Free
@@ -996,15 +1048,26 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
                 } break;
                 case BinOpType_Add:
                 {
-                    self->pref_out_reg = Register_ToString[Register_None];
+                    enum Register r1 = Compiler__FirstFreeReg(self);
+                    self->pref_out_reg = Register_ToString[r1];
                     char* n1 = Compiler_CompileNode(self, lhs);
                     bool al_n1 = self->alloc_ret_reg;
+                    self->used_regs[r1] = true; // TODO!!!
 
-                    self->pref_out_reg = Register_ToString[Register_None];
+                    enum Register r2 = Compiler__FirstFreeReg(self);
+                    self->pref_out_reg = Register_ToString[r2];
                     char* n2 = Compiler_CompileNode(self, rhs);
                     bool al_n2 = self->alloc_ret_reg;
+                    self->used_regs[r2] = true;
 
+                    // printf("Writing add instr %s, %s\n", n1, n2);
                     Compiler__WriteBinInstr(self, "add", n1, n2);
+
+                    self->used_regs[r1] = false;
+                    self->used_regs[r2] = false;
+                    if(al_n2) free(n2);
+                    self->alloc_ret_reg = al_n1;
+                    return n1;
                 }
                 default: Compiler__Error(self, "Binary operation is not yet implemented!");
             }
@@ -1014,8 +1077,6 @@ char* Compiler_CompileNode(Compiler* self, const AstNode* node)
             self->pref_out_reg = Register_ToString[Register_Rax];
             char* p = Compiler_CompileNode(self, ((AstNode_Return*)node)->value);
             Compiler__WriteBinInstr(self, "mov", Register_ToString[Register_Rax], p);
-            // if(!StringEqual(p, Register_ToString[Register_Eax]))
-            //     Compiler__Write(self, "mov %s, %s", );
             if(self->alloc_ret_reg) free(p);
             Compiler__Write(self, "pop rbp");
             Compiler__Write(self, "ret");
@@ -1047,9 +1108,11 @@ int System_Format(const char* format, ...)
     return ret;
 }
 
+bool Compiler_SaveDebugData = false;
+
 int Command_Assembler(const char* input_name, const char* output_name)
 {
-    return System_Format("as %s -o %s", input_name, output_name);
+    return System_Format("as %s %s -o %s", Compiler_SaveDebugData ? "-g" : "", input_name, output_name);
 }
 
 const char* MACOS_LINKER_COMMAND =
@@ -1057,7 +1120,7 @@ const char* MACOS_LINKER_COMMAND =
 const char* LINUX_LINKER_COMMAND =
     "ld %s -o %s -e _start -static";
 
-#ifdef __darwin__
+#ifdef __APPLE__
 #define LINKER_COMMAND_FMT MACOS_LINKER_COMMAND
 #else
 #define LINKER_COMMAND_FMT LINUX_LINKER_COMMAND
@@ -1089,6 +1152,8 @@ int Build(const char* input_name, const char* output_name)
     return 0;
 }
 
+char* Compile_OutputAssemblyFile = NULL;
+
 int Compile(const char* input_file, const char* output_file)
 {
 
@@ -1111,13 +1176,19 @@ int Compile(const char* input_file, const char* output_file)
     parser.root = (AstNode*)Parser_ParseProc(&parser);
     Lexer_Free(&lexer);
 
-    // AstNode_Show(parser.root, 0);
+    if(Compiler_IsDebug)
+    {
+        AstNode_Show(parser.root, 0);
+        puts("");
+    }
 
     char temp_filename[] = "/tmp/test_compl_out_XXXXXX";
     mkstemp(temp_filename);
+    if(!Compile_OutputAssemblyFile)
+        Compile_OutputAssemblyFile = temp_filename;
 
     Compiler compiler;
-    Compiler_Initialize(&compiler, temp_filename);
+    Compiler_Initialize(&compiler, Compile_OutputAssemblyFile);
 
     Compiler_WriteHeaders(&compiler);
     char* tmp = Compiler_CompileNode(&compiler, parser.root);
@@ -1126,7 +1197,9 @@ int Compile(const char* input_file, const char* output_file)
     Parser_Free(&parser);
     Compiler_Free(&compiler);
 
-    int ret = Build(temp_filename, output_file);
+    if(Compiler_IsDebug) return 0;
+    
+    int ret = Build(Compile_OutputAssemblyFile, output_file);
     return ret == 0 ? 0 : 1;
 }
 
@@ -1142,7 +1215,8 @@ int CLI(int argc, char* argv[])
         {
             last_opt = argv[i][1];
             switch(last_opt) {
-                case 'd': Compiler_ShouldOutputToStderr = true; break;
+                case 'd': Compiler_IsDebug = true; break;
+                case 'g': Compiler_SaveDebugData = true; break;
                 default: break;
             }
         }
@@ -1150,6 +1224,7 @@ int CLI(int argc, char* argv[])
         {
             switch(last_opt) {
                 case 'o': strncpy(output_file, argv[i], 256); break;
+                case 's': Compile_OutputAssemblyFile = argv[i]; break;
                 case   0: strncpy(input_file, argv[i], 256); break;
                 default:
                 {

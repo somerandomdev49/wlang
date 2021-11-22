@@ -2,3 +2,5 @@
 .vscode
 out
 test
+testing.o
+testing
