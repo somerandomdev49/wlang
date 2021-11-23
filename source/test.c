@@ -875,6 +875,44 @@ void Compiler__WriteNoIndent(Compiler* self, const char* fmt, ...)
     va_end(va);
 }
 
+enum Register Compiler__FirstFreeReg(Compiler* self)
+{
+    for(int i = 1; i < Register__Last; ++i)
+        if(!self->used_regs[i]) return i;
+    return 0;
+}
+
+enum Register Compiler__PrefOutRegEnum(Compiler* self)
+{
+    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
+        ? Compiler__FirstFreeReg(self)
+        : Register_None;
+}
+
+
+char* Compiler__PrefOutReg(Compiler* self)
+{
+    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
+        ? Register_ToString[Compiler__FirstFreeReg(self)]
+        : self->pref_out_reg;
+}
+
+
+void Compiler__WriteBinInstr(Compiler* self, const char* ins, const char* dst, const char* src)
+{
+    if(StringEqual(dst, src)) return;
+    if(StringStartsWith(dst, "qword ptr") && StringStartsWith(src, "qword ptr"))
+    {
+        enum Register r = Compiler__FirstFreeReg(self);
+        Compiler__Write(self, "%s %s, %s", ins, Register_ToString[r], src);
+        Compiler__Write(self, "%s %s, %s", ins, dst, Register_ToString[r]);
+    }
+    else
+    {
+        Compiler__Write(self, "%s %s, %s", ins, dst, src);
+    }
+}
+
 // ??
 void Compiler__WriteSyscall_Exit(Compiler* self, char* retcode)
 {
@@ -896,45 +934,8 @@ void Compiler_WriteHeaders(Compiler* self)
     Compiler__Begin(self, "_start:");
         Compiler__Write(self, "call _main");
         Compiler__Write(self, "mov rdi, rax");
-        Compiler__WriteSyscall_Exit(self, NULL);
+        Compiler__WriteSyscall_Exit(self, "rdi");
     Compiler__End(self);
-}
-
-enum Register Compiler__FirstFreeReg(Compiler* self)
-{
-    for(int i = 1; i < Register__Last; ++i)
-        if(!self->used_regs[i]) return i;
-    return 0;
-}
-
-void Compiler__WriteBinInstr(Compiler* self, const char* ins, const char* dst, const char* src)
-{
-    if(StringEqual(dst, src)) return;
-    if(StringStartsWith(dst, "qword ptr") && StringStartsWith(src, "qword ptr"))
-    {
-        enum Register r = Compiler__FirstFreeReg(self);
-        Compiler__Write(self, "%s %s, %s", ins, Register_ToString[r], src);
-        Compiler__Write(self, "%s %s, %s", ins, dst, Register_ToString[r]);
-    }
-    else
-    {
-        Compiler__Write(self, "%s %s, %s", ins, dst, src);
-    }
-}
-
-enum Register Compiler__PrefOutRegEnum(Compiler* self)
-{
-    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
-        ? Compiler__FirstFreeReg(self)
-        : Register_None;
-}
-
-
-char* Compiler__PrefOutReg(Compiler* self)
-{
-    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
-        ? Register_ToString[Compiler__FirstFreeReg(self)]
-        : self->pref_out_reg;
 }
 
 bool Compiler__IsAssignable(Compiler* self, const AstNode* node) { return true; }
