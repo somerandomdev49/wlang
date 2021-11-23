@@ -1,14 +1,16 @@
-# To Do:
+# To Do
 
 ## Things that must be implemented
 
-Three-Address Code IR.
-Register Allocation for assembly.
-Rewrite the compiler.
+* Three-Address Code IR.
+* Register Allocation for assembly.
+* Rewrite the compiler.
+* Change `BinOpType_ToString()` and `BinOpType_ToString2()` to use arrays instead of a switch statement.
 
 ## Things that aren't working, but should
 
 bad output with
+
 ```c
 proc main()
 {

@@ -5,7 +5,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include "util.h"
-#include "arch.h"
+#include "arch/x86_64/arch.h"
 
 #define WLANG_TARGET_DARWIN 0
 #define WLANG_TARGET_LINUX 1
@@ -31,7 +31,7 @@
         T* data; \
         size_t count; \
     } LIST(T); \
-    void LISTFN(T, Intialize)(LIST(T)* self) \
+    void LISTFN(T, Initialize)(LIST(T)* self) \
     { self->count = 0; self->data = NULL; } \
     void LISTFN(T, _IncrSize)(LIST(T)* self) \
     { if(self->count == 0) self->data = malloc(sizeof(T) * (++self->count)); \
@@ -55,7 +55,7 @@
         T* data; \
         size_t count; \
     } HASHMAP(T); \
-    void HASHMAPFN(T, Intialize)(HASHMAP(T)* self) \
+    void HASHMAPFN(T, Initialize)(HASHMAP(T)* self) \
     { self->count = 0; self->data = NULL; } \
     void HASHMAPFN(T, _IncrSize)(HASHMAP(T)* self) \
     { if(self->count == 0) self->data = malloc(sizeof(T) * (++self->count)); \
@@ -141,7 +141,7 @@ void Lexer_Initialize(Lexer* self, const char* filepath)
 {
     self->source = fopen(filepath, "r");
     if(!self->source) perror("Failed to open file");
-    TokenList_Intialize(&self->tokens);
+    TokenList_Initialize(&self->tokens);
     self->current = 0;
 }
 void Lexer_Free(Lexer* self)
@@ -419,7 +419,7 @@ const char* BinOpType_ToString2(enum BinOpType t)
     case BinOpType_And: return "And";
     case BinOpType_Cor: return "Rr";
     case BinOpType_Bnd: return "Binary And";
-    case BinOpType_Bor: return "Binary Rr";
+    case BinOpType_Bor: return "Binary Or";
     case BinOpType_Mod: return "Modulus";
     case BinOpType_Xor: return "Xor";
     case BinOpType_Set: return "Set";
@@ -480,7 +480,7 @@ void AstNode_FreeAny(AstNode* node)
 
 typedef struct { Lexer* l; AstNode* root; } Parser;
 
-void Parser_Intialize(Parser* parser, Lexer* l)
+void Parser_Initialize(Parser* parser, Lexer* l)
 {
     parser->l = l;
     parser->root = NULL;
@@ -647,7 +647,7 @@ AstNode* Parser_ParseStatement(Parser* self)
     else if(Parser__Is(self, '{'))
     {
         Lexer_Next(self->l);
-        AstNodePtrList stmts; AstNodePtrList_Intialize(&stmts);
+        AstNodePtrList stmts; AstNodePtrList_Initialize(&stmts);
         while(!Parser__Is(self, '}'))
             AstNodePtrList_PushValue(&stmts, Parser_ParseStatement(self));
         Lexer_Next(self->l);
@@ -680,7 +680,7 @@ AstNode_Proc* Parser_ParseProc(Parser* self)
 {
     Parser__ExpectKeywordAndMove(self, "proc");
     char* name = Lexer_Next(self->l)->value;
-    CStrList args; CStrList_Intialize(&args);
+    CStrList args; CStrList_Initialize(&args);
 
     Parser__ExpectAndMove(self, '(');
     while(!Parser__Is(self, ')'))
@@ -743,356 +743,266 @@ void AstNode_Show(AstNode* node, int indent)
     }
 }
 
-typedef struct { const char* name; size_t stack_offset; } Variable; DECLARE_HASHMAP_TYPE(Variable, const char*)
-typedef struct { const char* name; VariableHashMap vars; } Procedure; DECLARE_HASHMAP_TYPE(Procedure, const char*)
-
-bool CompareVariableKey(Variable* var, const char* key) { return var->name == key || strcmp(var->name, key) == 0; }
-bool CompareProcedureKey(Procedure* proc, const char* key) { return proc->name == key || strcmp(proc->name, key) == 0; }
-
-void Procedure_Initialize(Procedure* self, const char* name)
+enum IR_OpType
 {
-    VariableHashMap_Intialize(&self->vars);
-    self->name = name;
-}
-
-char* Register_ToString[] = { "<error>", "rax", "rbx", "rcx", "rdx" };
-enum Register
-{
-    Register_None,
-    Register_Rax,
-    Register_Rbx,
-    Register_Rcx,
-    Register_Rdx,
-    Register__Last
+    IR_OpType_Add, // +
+    IR_OpType_Sub, // -
+    IR_OpType_Mul, // *
+    IR_OpType_Div, // /
+    IR_OpType_Eql, // ==
+    IR_OpType_Neq, // !=
+    IR_OpType_Grt, // >
+    IR_OpType_Lst, // <
+    IR_OpType_Geq, // >=
+    IR_OpType_Leq, // <=
+    IR_OpType_And, // &&
+    IR_OpType_Cor, // ||
+    IR_OpType_Bnd, // &
+    IR_OpType_Bor, // |
+    IR_OpType_Mod, // %
+    IR_OpType_Xor, // ^
+    IR_OpType_Set, // =
+    IR_OpType_Neg, // -
+    IR_OpType_Not, // !
+    IR_OpType_Bno, // ~
+    IR_OpType_Cpy, // cpy A <- B
+    IR_OpType_SetMem, // setmem ADDR <- A
+    IR_OpType_SetOff, // setoff OFFSET <- A
+    IR_OpType_Ret,
+    IR_OpType__Last,
 };
 
-const char* Register__32(const char* regstr)
+const char* IR_OpType_ToString(enum IR_OpType t)
 {
-    if(!regstr) return regstr;
-    int l = strlen(regstr);
-    if(l < 3) return NULL; // x86, no >=32bit register exists with a name less than 3 chars.
-
-    /**/ if(regstr[0] == 'r') // 64 bit register.
+    static const char* strs[] =
     {
-        switch(regstr[1])
-        {
-        case 'a': return "eax";
-        case 'b': return "ebx";
-        case 'c': return "ecx";
-        case 'd': return "edx";
-        default: return NULL;
-        }
-    }
-    else if(regstr[0] == 'e') // 32-bit register, do nothing.
-        return regstr;
-
-    return NULL;
+        "Add",
+        "Sub",
+        "Mul",
+        "Div",
+        "Eql",
+        "Neq",
+        "Grt",
+        "Lst",
+        "Geq",
+        "Leq",
+        "And",
+        "Cor",
+        "Bnd",
+        "Bor",
+        "Mod",
+        "Xor",
+        "Set",
+        "Neg",
+        "Not",
+        "Bno",
+        "Cpy",
+        "SetMem",
+        "SetOff",
+        "Ret",
+    };
+    return t < IR_OpType__Last ? strs[t] : "<UNKNOWN>";
+}
+const char* IR_OpType_ToString2(enum IR_OpType t)
+{
+    static const char* strs[] =
+    {
+        "Add",
+        "Substract",
+        "Multiply",
+        "Divide",
+        "Equals",
+        "Not Equal",
+        "Greater Then",
+        "Less Than",
+        "Greater or Equal",
+        "Less or Equal",
+        "And",
+        "Rr",
+        "Binary And",
+        "Binary Rr",
+        "Modulus",
+        "Xor",
+        "Set",
+        "Negation",
+        "Not",
+        "Binary Not",
+        "Copy",
+        "Set Memory",
+        "Set Offset",
+        "Return",
+    };
+    return t < IR_OpType__Last ? strs[t] : "<UNKNOWN>";
 }
 
-// TODO: IR
-
+typedef unsigned long IR_V;
+typedef unsigned long IR_L;
+typedef char IR_O;
+typedef struct { char* name; IR_V var; } IR_Var; DECLARE_HASHMAP_TYPE(IR_Var, const char*)
+typedef struct { IR_O type; IR_V res, lhs, rhs; IR_L lbl; } IR_Instr; DECLARE_LIST_TYPE(IR_Instr)
 typedef struct
 {
-    FILE* output;
-    int indent, tab_width;
+    char* name;
+    IR_VarHashMap locals;
+    IR_V next_local;
+    IR_InstrList code;
+} IR_Proc;
+DECLARE_HASHMAP_TYPE(IR_Proc, const char*)
 
-    char* pref_out_reg;
-    bool alloc_ret_reg;
-    size_t last_stack_offset;
-    bool used_regs[Register__Last];
-    bool ret_written;
+bool IR_ProcHashMap_CompareKey(IR_Proc* proc, const char* key) { return StringEqual(proc->name, key); }
+bool IR_VarHashMap_CompareKey(IR_Var* var, const char* key) { return StringEqual(var->name, key); }
 
-    ProcedureHashMap procs;
-    Procedure* current_proc; // TODO: VariableContext stack
-} Compiler;
-bool Compiler_IsDebug = false;
+IR_Var IR_Var_Create(const char* name, IR_V var) { return (IR_Var){ AllocStringCopy(name), var }; }
+void IR_Var_Free(IR_Var* self) { free(self->name); }
 
-void Compiler_Initialize(Compiler* self, const char* filename)
+void IR_Proc_Initialize(IR_Proc* proc, const char* name)
 {
-    // printf("Compiler_IsDebug = %s\n", Compiler_IsDebug ? "yes" : "no");
-    self->output = Compiler_IsDebug ? stderr : fopen(filename, "w");
-    self->indent = 0;
-    self->tab_width = 4;
-    self->pref_out_reg = Register_ToString[Register_None];
-    self->current_proc = NULL;
-    self->alloc_ret_reg = false;
-    self->last_stack_offset = 4;
-    self->ret_written = false;
-    memset(self->used_regs, 0, sizeof(bool) * Register__Last);
-    ProcedureHashMap_Intialize(&self->procs);
+    proc->name = AllocStringCopy(name);
+    IR_InstrList_Initialize(&proc->code);
 }
 
-void Compiler__Error(Compiler* self, const char* msg)
+IR_Var IR_Proc_NextVar(IR_Proc* self, const char* name)
+{ return IR_Var_Create(name, self->next_local++); }
+
+IR_Var* IR_Proc_GetVar(IR_Proc* self, const char* name)
+{ return IR_VarHashMap_Find(&self->locals, name, &IR_VarHashMap_CompareKey); }
+
+void IR_Proc_Free(IR_Proc* proc)
+{
+    free(proc->name);
+    IR_VarHashMap_ForEachRef(&proc->locals, &IR_Var_Free);
+    IR_InstrList_Free(&proc->code);
+}
+
+typedef struct { IR_ProcHashMap procs; } IR_Builder;
+
+void IR_Builder_Initialize(IR_Builder* self)
+{
+    IR_ProcHashMap_Initialize(&self->procs);
+}
+
+void IR_Builder_Free(IR_Builder* self)
+{
+    IR_ProcHashMap_ForEachRef(&self->procs, &IR_Proc_Free);
+    IR_ProcHashMap_Free(&self->procs);
+}
+
+void IR_Proc__EmitV(IR_Proc* self, enum IR_OpType op, IR_V val)
+{
+    IR_Instr instr = { op, 0, val, 0, 0 };
+    IR_InstrList_PushRef(&self->code, &instr);
+}
+void IR_Proc__Emit1(IR_Proc* self, enum IR_OpType op, IR_V res, IR_V val)
+{
+    IR_Instr instr = { op, res, val, 0, 0 };
+    IR_InstrList_PushRef(&self->code, &instr);
+}
+void IR_Proc__Emit2(IR_Proc* self, enum IR_OpType op, IR_V res, IR_V lhs, IR_V rhs)
+{
+    IR_Instr instr = { op, res, lhs, rhs, 0 };
+    IR_InstrList_PushRef(&self->code, &instr);
+}
+void IR_Proc__EmitL(IR_Proc* self, enum IR_OpType op, IR_L lbl, IR_V lhs, IR_V rhs)
+{
+    IR_Instr instr = { op, 0, lhs, rhs, lbl };
+    IR_InstrList_PushRef(&self->code, &instr);
+}
+
+void IR_Builder__Error(IR_Builder* self, const char* msg)
 {
     fprintf(stderr, "\033[0;31mError:\033[0;0m %s\n", msg);
 }
-
-char* Compiler__StackOffsetString(size_t offset)
-{
-    char* m = malloc(32);
-    snprintf(m, 32, "qword ptr [rbp - %zu]", offset);
-    return m;
-}
-
-void Compiler__Indent(Compiler* self)
-{
-    for(int i = 0; i < self->indent * self->tab_width; ++i)
-        fputc(' ', self->output);
-}
-
-void Compiler__End(Compiler* self) { self->indent--; fputc('\n', self->output); }
-void Compiler__Begin(Compiler* self, const char* fmt, ...)
+void IR_Builder__ErrorFormat(IR_Builder* self, const char* fmt, ...)
 {
     va_list va;
     va_start(va, fmt);
-
-    Compiler__Indent(self);
-    vfprintf(self->output, fmt, va);
-    fputc('\n', self->output);
-    self->indent++;
-
-    va_end(va);
-}
-void Compiler__Write(Compiler* self, const char* fmt, ...)
-{
-    va_list va;
-    va_start(va, fmt);
-
-    Compiler__Indent(self);
-    vfprintf(self->output, fmt, va);
-    fputc('\n', self->output);
-
-    va_end(va);
-}
-void Compiler__WriteNoIndent(Compiler* self, const char* fmt, ...)
-{
-    va_list va;
-    va_start(va, fmt);
-
-    vfprintf(self->output, fmt, va);
-    fputc('\n', self->output);
-
+    fprintf(stderr, "\033[0;31mError:\033[0;0m\n");
+    vfprintf(stderr, fmt, va);
+    fputc('\n', stderr);
     va_end(va);
 }
 
-enum Register Compiler__FirstFreeReg(Compiler* self)
+void IR_Builder__Fatal(IR_Builder* self)
 {
-    for(int i = 1; i < Register__Last; ++i)
-        if(!self->used_regs[i]) return i;
-    return 0;
+    fprintf(stderr, "\033[0;31mFatal Error![0;0m\n");
+    exit(1);
 }
 
-enum Register Compiler__PrefOutRegEnum(Compiler* self)
+IR_V IR_Builder_BuildNode(IR_Builder* self, AstNode* node, IR_Proc* proc, IR_V target) // TODO: IR_Locals
 {
-    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
-        ? Compiler__FirstFreeReg(self)
-        : Register_None;
-}
-
-
-char* Compiler__PrefOutReg(Compiler* self)
-{
-    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
-        ? Register_ToString[Compiler__FirstFreeReg(self)]
-        : self->pref_out_reg;
-}
-
-
-void Compiler__WriteBinInstr(Compiler* self, const char* ins, const char* dst, const char* src)
-{
-    if(StringEqual(dst, src)) return;
-    if(StringStartsWith(dst, "qword ptr") && StringStartsWith(src, "qword ptr"))
-    {
-        enum Register r = Compiler__FirstFreeReg(self);
-        Compiler__Write(self, "%s %s, %s", ins, Register_ToString[r], src);
-        Compiler__Write(self, "%s %s, %s", ins, dst, Register_ToString[r]);
-    }
-    else
-    {
-        Compiler__Write(self, "%s %s, %s", ins, dst, src);
-    }
-}
-
-// ??
-void Compiler__WriteSyscall_Exit(Compiler* self, char* retcode)
-{
-#if WLANG_TARGET == WLANG_TARGET_DARWIN
-    // if(!StringEqual(retcode, "ebx") && !StringEqual(retcode, "rbx")) Compiler__Write(self, "mov ebx, %s", Register__32(retcode));
-    Compiler__Write(self, "mov eax, 0x%x", WLANG_SYSCALL__DARWIN__EXIT);
-    Compiler__Write(self, "syscall");
-#elif WLANG_TARGET == WLANG_TARGET_LINUX
-    Compiler__WriteBinInstr(self, "mov", "rdi", retcode);
-    Compiler__Write(self, "mov eax, 0x%x", WLANG_SYSCALL__LINUX__EXIT);
-    Compiler__Write(self, "syscall");
-#endif
-}
-
-void Compiler_WriteHeaders(Compiler* self)
-{
-    Compiler__WriteNoIndent(self, ".intel_syntax noprefix");
-    Compiler__WriteNoIndent(self, ".global _start");
-    Compiler__Begin(self, "_start:");
-        Compiler__Write(self, "call _main");
-        Compiler__Write(self, "mov rdi, rax");
-        Compiler__WriteSyscall_Exit(self, "rdi");
-    Compiler__End(self);
-}
-
-bool Compiler__IsAssignable(Compiler* self, const AstNode* node) { return true; }
-
-char* Compiler_CompileNode(Compiler* self, const AstNode* node)
-{
-    // printf("\033[0;32mCompiling %s...\033[0;0m\n", NodeType_ToString(node->type));
     switch(node->type)
     {
         case NodeType_Proc:
         {
-            Procedure proc; Procedure_Initialize(&proc, ((AstNode_Proc*)node)->name);
-            ProcedureHashMap_PushRef(&self->procs, &proc);
-            self->current_proc = &self->procs.data[self->procs.count - 1];
-
-            Compiler__WriteNoIndent(self, ".global _%s", ((AstNode_Proc*)node)->name);
-            Compiler__Begin(self, "_%s:", ((AstNode_Proc*)node)->name);
-            // TODO: Arguments.
-            Compiler__Write(self, "push rbp");
-            Compiler__Write(self, "mov rbp, rsp");
-            self->pref_out_reg = Register_ToString[Register_None];
-            char* tmp = Compiler_CompileNode(self, ((AstNode_Proc*)node)->body);
-            if(self->alloc_ret_reg) free(tmp);
-            if(!self->ret_written)
-            {
-                Compiler__Write(self, "pop rbp");
-                Compiler__Write(self, "ret");
-            }
-            Compiler__End(self);
-        } break;
-        case NodeType_Block:
-        {
-            char* p = Register_ToString[Register_None];
-            self->alloc_ret_reg = false;
-            for(size_t i = 0; i < ((AstNode_Block*)node)->nodes.count; ++i)
-            {
-                self->ret_written = false;
-                self->pref_out_reg = Register_ToString[Register_None];
-                p = Compiler_CompileNode(self, ((AstNode_Block*)node)->nodes.data[i]);
-                if(i != ((AstNode_Block*)node)->nodes.count - 1 && self->alloc_ret_reg)
-                { self->alloc_ret_reg = false; free(p); }
-            }
-
-            self->alloc_ret_reg = self->alloc_ret_reg;
-            return p;
-        } break;
-        case NodeType_Int:
-        {
-            char* p = Compiler__PrefOutReg(self);
-            Compiler__Write(self, "mov %s, %ld", p, ((AstNode_Int*)node)->value);
-            self->alloc_ret_reg = false;
-            return p;
-        } break;
-        case NodeType_Decl:
-        {
-            if(self->current_proc == NULL) { Compiler__Error(self, "Global variables are not supported."); break; }
-            size_t v_stack_offset = self->last_stack_offset;
-            self->last_stack_offset += 8; // TODO: Variable size
-
-            VariableHashMap_PushValue(&self->current_proc->vars, (Variable){
-                /* name:   */ ((AstNode_Decl*)node)->name, // TODO: AllocStringCopy & Free
-                /* offset: */ v_stack_offset
-            });
-
-            if(((AstNode_Decl*)node)->value != NULL)
-            {
-                AstNode_Iden* i = AstNode_Iden_Create(((AstNode_Decl*)node)->name);
-                AstNode_BinOp* s = AstNode_BinOp_Create(BinOpType_Set, (AstNode*)i, ((AstNode_Decl*)node)->value);
-                char* offset_string = Compiler__StackOffsetString(v_stack_offset);
-
-                self->pref_out_reg = offset_string;
-                char* tmp = Compiler_CompileNode(self, (AstNode*)s);
-                if(self->alloc_ret_reg) free(tmp);
-
-                free(offset_string);
-                AstNode_BinOp_Free(s);
-            }
-
-            self->alloc_ret_reg = true;
-            return Compiler__StackOffsetString(v_stack_offset);
-        } break;
-        case NodeType_Iden:
-        {
-            if(self->current_proc == NULL) { Compiler__Error(self, "Global variables are not supported."); break; }
-            Variable* v = VariableHashMap_Find(&self->current_proc->vars, ((AstNode_Iden*)node)->iden, &CompareVariableKey);
-            char* p = Compiler__PrefOutReg(self);
-            char* loc = Compiler__StackOffsetString(v->stack_offset);
-            Compiler__WriteBinInstr(self, "mov", p, loc);
-            self->alloc_ret_reg = false;
-            return p;
-        } break;
-        case NodeType_BinOp:
-        {
-            char* p = Compiler__PrefOutReg(self); (void)p;
-            AstNode* lhs = ((AstNode_BinOp*)node)->left;
-            AstNode* rhs = ((AstNode_BinOp*)node)->right;
-            switch(((AstNode_BinOp*)node)->type)
-            {
-                case BinOpType_Set:
-                {
-                    if(!Compiler__IsAssignable(self, lhs)) { Compiler__Error(self, "Cannot assign!"); break; }
-                    Variable* v = VariableHashMap_Find(&self->current_proc->vars, ((AstNode_Iden*)lhs)->iden, &CompareVariableKey);
-
-                    char* var_loc = Compiler__StackOffsetString(v->stack_offset);
-                    self->pref_out_reg = var_loc;
-                    char* val = Compiler_CompileNode(self, rhs);
-                    if(self->alloc_ret_reg) free(val);
-
-                    self->alloc_ret_reg = true;
-                    return var_loc;
-                } break;
-                case BinOpType_Add:
-                {
-                    enum Register r1 = Compiler__FirstFreeReg(self);
-                    self->pref_out_reg = Register_ToString[r1];
-                    char* n1 = Compiler_CompileNode(self, lhs);
-                    bool al_n1 = self->alloc_ret_reg;
-                    self->used_regs[r1] = true; // TODO!!!
-
-                    enum Register r2 = Compiler__FirstFreeReg(self);
-                    self->pref_out_reg = Register_ToString[r2];
-                    char* n2 = Compiler_CompileNode(self, rhs);
-                    bool al_n2 = self->alloc_ret_reg;
-                    self->used_regs[r2] = true;
-
-                    // printf("Writing add instr %s, %s\n", n1, n2);
-                    Compiler__WriteBinInstr(self, "add", n1, n2);
-
-                    self->used_regs[r1] = false;
-                    self->used_regs[r2] = false;
-                    if(al_n2) free(n2);
-                    self->alloc_ret_reg = al_n1;
-                    return n1;
-                }
-                default: Compiler__Error(self, "Binary operation is not yet implemented!");
-            }
+            IR_Proc p;
+            IR_Proc_Initialize(&p, ((AstNode_Proc*)node)->name);
+            IR_ProcHashMap_PushRef(&self->procs, &p);
+            IR_Builder_BuildNode(self, ((AstNode_Proc*)node)->body, &p, (IR_V)-1);
         } break;
         case NodeType_Return:
         {
-            self->pref_out_reg = Register_ToString[Register_Rax];
-            char* p = Compiler_CompileNode(self, ((AstNode_Return*)node)->value);
-            Compiler__WriteBinInstr(self, "mov", Register_ToString[Register_Rax], p);
-            if(self->alloc_ret_reg) free(p);
-            Compiler__Write(self, "pop rbp");
-            Compiler__Write(self, "ret");
-            self->ret_written = true;
+            IR_V o = IR_Builder_BuildNode(self, ((AstNode_Return*)node)->value, proc, (IR_V)-1);
+            IR_Proc__EmitV(proc, IR_OpType_Ret, o);
         } break;
-        default: Compiler__Write(self, "# Did not compile node of type %s.", NodeType_ToString2(node->type)); break;
-    }
+        case NodeType_Block:
+        {
+            AstNodePtrList* l = &((AstNode_Block*)node)->nodes;
+            for(size_t i = 0; i < l->count; ++i)
+                IR_Builder_BuildNode(self, l->data[i], proc, i == l->count - 1 ? target : (IR_V)-1);
+        } break;
+        case NodeType_Int: IR_Proc__Emit1(proc, IR_OpType_Set, target, ((AstNode_Int*)node)->value); break;
+        case NodeType_Iden:
+        {
+            IR_Var* var = NULL;
+            /* var = IR_Build__GetGlobal(((AstNode_Iden*)node)->iden) */
+            if(!var) // Not a global.
+            {
+                if(!proc)
+                {
+                    IR_Builder__Error(self, "Internal: `proc` is NULL on NodeType_Iden and no global var found.");
+                    IR_Builder__Fatal(self);
+                }
 
-    self->alloc_ret_reg = false;
-    return Register_ToString[Register_None];
+                var = IR_Proc_GetVar(proc, ((AstNode_Iden*)node)->iden);
+                if(!var)
+                {
+                    IR_Builder__ErrorFormat(self, "No such variable: '%s'", ((AstNode_Iden*)node)->iden);
+                }
+            }
+            IR_Proc__Emit1(proc, IR_OpType_Set, target, ((AstNode_Int*)node)->value);
+        } break;
+        default: IR_Builder__ErrorFormat(self, "Failed to build IR from '%s'", NodeType_ToString2(node->type)); break;
+    }
+    return target;
 }
 
-void Compiler_Free(Compiler* self)
+void IR_Builder__DumpInstr(IR_Builder* self, FILE* output, IR_Instr* instr)
 {
-    fclose(self->output);
+    fprintf(output, "\t%lu = %lu %s %lu (->%lu)\n",
+        instr->res, instr->lhs, IR_OpType_ToString(instr->type), instr->rhs, instr->lbl);
+    // switch(instr->type)
+    // {
+    // case 
+    // }
+}
+
+void IR_Builder_Dump(IR_Builder* self, FILE* output)
+{
+    int line = 1;
+    for(size_t pi = 0; pi < self->procs.count; ++pi)
+    {
+        IR_Proc* proc = &self->procs.data[pi];
+        
+        fprintf(output, "\nPROC %s: \t\t## {%zu}\n", proc->name, proc->code.count);
+        line += 2;
+
+        for(size_t i = 0; i < proc->code.count; ++i)
+        {
+            IR_Builder__DumpInstr(self, output, &proc->code.data[i]);
+            line += 1;
+        }
+    }
+    fprintf(output, "\n -- END --\n");
 }
 
 int System_Format(const char* format, ...)
@@ -1153,6 +1063,7 @@ int Build(const char* input_name, const char* output_name)
     return 0;
 }
 
+bool Compiler_IsDebug = false;
 char* Compile_OutputAssemblyFile = NULL;
 
 int Compile(const char* input_file, const char* output_file)
@@ -1172,7 +1083,7 @@ int Compile(const char* input_file, const char* output_file)
     // }
 
     Parser parser;
-    Parser_Intialize(&parser, &lexer);
+    Parser_Initialize(&parser, &lexer);
 
     parser.root = (AstNode*)Parser_ParseProc(&parser);
     Lexer_Free(&lexer);
@@ -1180,7 +1091,7 @@ int Compile(const char* input_file, const char* output_file)
     if(Compiler_IsDebug)
     {
         AstNode_Show(parser.root, 0);
-        puts("");
+        fputc('\n', stdout);
     }
 
     char temp_filename[] = "/tmp/test_compl_out_XXXXXX";
@@ -1188,16 +1099,24 @@ int Compile(const char* input_file, const char* output_file)
     if(!Compile_OutputAssemblyFile)
         Compile_OutputAssemblyFile = temp_filename;
 
-    Compiler compiler;
-    Compiler_Initialize(&compiler, Compile_OutputAssemblyFile);
+    IR_Builder ir_builder;
+    IR_Builder_Initialize(&ir_builder);
 
-    Compiler_WriteHeaders(&compiler);
-    char* tmp = Compiler_CompileNode(&compiler, parser.root);
-    if(compiler.alloc_ret_reg) free(tmp);
+    IR_Builder_BuildNode(&ir_builder, parser.root, NULL, (IR_V)-1);
+    IR_Builder_Dump(&ir_builder, stdout);
+
+    IR_Builder_Free(&ir_builder);
+
+    // Compiler compiler;
+    // Compiler_Initialize(&compiler, Compile_OutputAssemblyFile);
+
+    // Compiler_WriteHeaders(&compiler);
+    // char* tmp = Compiler_CompileNode(&compiler, parser.root);
+    // if(compiler.alloc_ret_reg) free(tmp);
+
+    // Compiler_Free(&compiler);
 
     Parser_Free(&parser);
-    Compiler_Free(&compiler);
-
     if(Compiler_IsDebug) return 0;
     
     int ret = Build(Compile_OutputAssemblyFile, output_file);
