@@ -36,10 +36,10 @@
     void LISTFN(T, _IncrSize)(LIST(T)* self) \
     { if(self->count == 0) self->data = malloc(sizeof(T) * (++self->count)); \
       else self->data = realloc(self->data, sizeof(T) * (++self->count)); } \
-    void LISTFN(T, PushValue)(LIST(T)* self, T value) \
-    { LISTFN(T, _IncrSize)(self); self->data[self->count - 1] = value; } \
-    void LISTFN(T, PushRef)(LIST(T)* self, T* value) \
-    { LISTFN(T, _IncrSize)(self); self->data[self->count - 1] = *value; } \
+    T* LISTFN(T, PushValue)(LIST(T)* self, T value) \
+    { LISTFN(T, _IncrSize)(self); self->data[self->count - 1] = value; return &self->data[self->count - 1]; } \
+    T* LISTFN(T, PushRef)(LIST(T)* self, T* value) \
+    { LISTFN(T, _IncrSize)(self); self->data[self->count - 1] = *value; return &self->data[self->count - 1]; } \
     void LISTFN(T, Free)(LIST(T)* self) \
     { free(self->data); self->count = 0; self->data = NULL; } \
     void LISTFN(T, ForEachRef)(LIST(T)* self, void (*func)(T*)) \
@@ -60,10 +60,10 @@
     void HASHMAPFN(T, _IncrSize)(HASHMAP(T)* self) \
     { if(self->count == 0) self->data = malloc(sizeof(T) * (++self->count)); \
       else self->data = realloc(self->data, sizeof(T) * (++self->count)); } \
-    void HASHMAPFN(T, PushValue)(HASHMAP(T)* self, T value) \
-    { HASHMAPFN(T, _IncrSize)(self); self->data[self->count - 1] = value; } \
-    void HASHMAPFN(T, PushRef)(HASHMAP(T)* self, T* value) \
-    { HASHMAPFN(T, _IncrSize)(self); self->data[self->count - 1] = *value; } \
+    T* HASHMAPFN(T, PushValue)(HASHMAP(T)* self, T value) \
+    { HASHMAPFN(T, _IncrSize)(self); self->data[self->count - 1] = value; return &self->data[self->count - 1]; } \
+    T* HASHMAPFN(T, PushRef)(HASHMAP(T)* self, T* value) \
+    { HASHMAPFN(T, _IncrSize)(self); self->data[self->count - 1] = *value; return &self->data[self->count - 1]; } \
     void HASHMAPFN(T, Free)(HASHMAP(T)* self) \
     { free(self->data); self->count = 0; self->data = NULL; } \
     void HASHMAPFN(T, ForEachRef)(HASHMAP(T)* self, void (*func)(T*)) \
@@ -77,7 +77,7 @@
 
 typedef char* CStr;
 void CStr_Free(char* s) { free(s); }
-DECLARE_LIST_TYPE(CStr)
+DECLARE_LIST_TYPE(CStr);
 
 typedef struct {
     char *data;
@@ -133,7 +133,7 @@ const char* TokenType_ToString(enum TokenType t)
 }
 
 typedef struct { int type; char* value; } Token;
-DECLARE_LIST_TYPE(Token)
+DECLARE_LIST_TYPE(Token);
 
 typedef struct { TokenList tokens; FILE* source; size_t current; } Lexer;
 
@@ -302,8 +302,8 @@ const char* NodeType_ToString2(enum NodeType t)
 
 typedef struct { enum NodeType type; } AstNode;
 typedef AstNode* AstNodePtr;
-DECLARE_LIST_TYPE(AstNode)
-DECLARE_LIST_TYPE(AstNodePtr)
+DECLARE_LIST_TYPE(AstNode);
+DECLARE_LIST_TYPE(AstNodePtr);
 
 #define ASTNODE_ALLOC(VAR, T, TYPE) T* VAR = malloc(sizeof(T)); VAR->node.type = TYPE
 #define ASTNODE_FREE(E) if(E) free(E)
@@ -761,14 +761,13 @@ enum IR_OpType
     IR_OpType_Bor, // |
     IR_OpType_Mod, // %
     IR_OpType_Xor, // ^
-    IR_OpType_Set, // =
     IR_OpType_Neg, // -
     IR_OpType_Not, // !
     IR_OpType_Bno, // ~
-    IR_OpType_Cpy, // cpy A <- B
-    IR_OpType_SetMem, // setmem ADDR <- A
-    IR_OpType_SetOff, // setoff OFFSET <- A
-    IR_OpType_Ret,
+    IR_OpType_Cpy, // cpy X <- Y
+    IR_OpType_SetMem, // setmem ADDR <- X
+    IR_OpType_SetOff, // setoff OFFSET <- X
+    IR_OpType_Ret, // ret X
     IR_OpType__Last,
 };
 
@@ -792,7 +791,6 @@ const char* IR_OpType_ToString(enum IR_OpType t)
         "Bor",
         "Mod",
         "Xor",
-        "Set",
         "Neg",
         "Not",
         "Bno",
@@ -823,7 +821,6 @@ const char* IR_OpType_ToString2(enum IR_OpType t)
         "Binary Rr",
         "Modulus",
         "Xor",
-        "Set",
         "Negation",
         "Not",
         "Binary Not",
@@ -838,8 +835,9 @@ const char* IR_OpType_ToString2(enum IR_OpType t)
 typedef unsigned long IR_V;
 typedef unsigned long IR_L;
 typedef char IR_O;
-typedef struct { char* name; IR_V var; } IR_Var; DECLARE_HASHMAP_TYPE(IR_Var, const char*)
-typedef struct { IR_O type; IR_V res, lhs, rhs; IR_L lbl; } IR_Instr; DECLARE_LIST_TYPE(IR_Instr)
+typedef struct { char* name; IR_V var; } IR_Var; DECLARE_HASHMAP_TYPE(IR_Var, const char*);
+typedef struct { IR_O type; IR_V res, lhs, rhs; IR_L lbl; } IR_Instr;
+DECLARE_LIST_TYPE(IR_Instr);
 typedef struct
 {
     char* name;
@@ -847,17 +845,19 @@ typedef struct
     IR_V next_local;
     IR_InstrList code;
 } IR_Proc;
-DECLARE_HASHMAP_TYPE(IR_Proc, const char*)
+DECLARE_HASHMAP_TYPE(IR_Proc, const char*);
 
 bool IR_ProcHashMap_CompareKey(IR_Proc* proc, const char* key) { return StringEqual(proc->name, key); }
 bool IR_VarHashMap_CompareKey(IR_Var* var, const char* key) { return StringEqual(var->name, key); }
 
-IR_Var IR_Var_Create(const char* name, IR_V var) { return (IR_Var){ AllocStringCopy(name), var }; }
+IR_Var IR_Var_Create(const char* name, IR_V var) { return (IR_Var){ name ? AllocStringCopy(name) : NULL, var }; }
 void IR_Var_Free(IR_Var* self) { free(self->name); }
 
 void IR_Proc_Initialize(IR_Proc* proc, const char* name)
 {
     proc->name = AllocStringCopy(name);
+    proc->next_local = 0;
+    IR_VarHashMap_Initialize(&proc->locals);
     IR_InstrList_Initialize(&proc->code);
 }
 
@@ -928,16 +928,22 @@ void IR_Builder__Fatal(IR_Builder* self)
     exit(1);
 }
 
+IR_V IR_Proc__Target(IR_Proc* self, IR_V target)
+{
+    if(target != (IR_V)-1) return target;
+    return self->next_local++;
+}
+
 IR_V IR_Builder_BuildNode(IR_Builder* self, AstNode* node, IR_Proc* proc, IR_V target) // TODO: IR_Locals
 {
     switch(node->type)
     {
         case NodeType_Proc:
         {
-            IR_Proc p;
-            IR_Proc_Initialize(&p, ((AstNode_Proc*)node)->name);
-            IR_ProcHashMap_PushRef(&self->procs, &p);
-            IR_Builder_BuildNode(self, ((AstNode_Proc*)node)->body, &p, (IR_V)-1);
+            IR_Proc initproc;
+            IR_Proc_Initialize(&initproc, ((AstNode_Proc*)node)->name);
+            IR_Proc* newproc = IR_ProcHashMap_PushRef(&self->procs, &initproc);
+            IR_Builder_BuildNode(self, ((AstNode_Proc*)node)->body, newproc, (IR_V)-1);
         } break;
         case NodeType_Return:
         {
@@ -948,9 +954,9 @@ IR_V IR_Builder_BuildNode(IR_Builder* self, AstNode* node, IR_Proc* proc, IR_V t
         {
             AstNodePtrList* l = &((AstNode_Block*)node)->nodes;
             for(size_t i = 0; i < l->count; ++i)
-                IR_Builder_BuildNode(self, l->data[i], proc, i == l->count - 1 ? target : (IR_V)-1);
+                IR_Builder_BuildNode(self, l->data[i], proc, i == l->count - 1 ? (target = IR_Proc__Target(proc, target)) : (IR_V)-1);
         } break;
-        case NodeType_Int: IR_Proc__Emit1(proc, IR_OpType_Set, target, ((AstNode_Int*)node)->value); break;
+        case NodeType_Int: IR_Proc__Emit1(proc, IR_OpType_Cpy, target = IR_Proc__Target(proc, target), ((AstNode_Int*)node)->value); break;
         case NodeType_Iden:
         {
             IR_Var* var = NULL;
@@ -969,7 +975,7 @@ IR_V IR_Builder_BuildNode(IR_Builder* self, AstNode* node, IR_Proc* proc, IR_V t
                     IR_Builder__ErrorFormat(self, "No such variable: '%s'", ((AstNode_Iden*)node)->iden);
                 }
             }
-            IR_Proc__Emit1(proc, IR_OpType_Set, target, ((AstNode_Int*)node)->value);
+            IR_Proc__Emit1(proc, IR_OpType_Cpy, target = IR_Proc__Target(proc, target), ((AstNode_Int*)node)->value);
         } break;
         default: IR_Builder__ErrorFormat(self, "Failed to build IR from '%s'", NodeType_ToString2(node->type)); break;
     }
@@ -980,10 +986,6 @@ void IR_Builder__DumpInstr(IR_Builder* self, FILE* output, IR_Instr* instr)
 {
     fprintf(output, "\t%lu = %lu %s %lu (->%lu)\n",
         instr->res, instr->lhs, IR_OpType_ToString(instr->type), instr->rhs, instr->lbl);
-    // switch(instr->type)
-    // {
-    // case 
-    // }
 }
 
 void IR_Builder_Dump(IR_Builder* self, FILE* output)
@@ -992,8 +994,8 @@ void IR_Builder_Dump(IR_Builder* self, FILE* output)
     for(size_t pi = 0; pi < self->procs.count; ++pi)
     {
         IR_Proc* proc = &self->procs.data[pi];
-        
-        fprintf(output, "\nPROC %s: \t\t## {%zu}\n", proc->name, proc->code.count);
+
+        fprintf(output, "\nproc %s: \t\t## {%zu}\n", proc->name, proc->code.count);
         line += 2;
 
         for(size_t i = 0; i < proc->code.count; ++i)
@@ -1118,7 +1120,7 @@ int Compile(const char* input_file, const char* output_file)
 
     Parser_Free(&parser);
     if(Compiler_IsDebug) return 0;
-    
+
     int ret = Build(Compile_OutputAssemblyFile, output_file);
     return ret == 0 ? 0 : 1;
 }
