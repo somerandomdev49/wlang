@@ -1,10 +1,9 @@
-/// DO NOT USE, OLD (PRE IR) COMPILER CODE ///
+/// DO NOT USE, OLD (PRE IR, REPLACED WITH NEW COMPILER) COMPILER CODE ///
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../util.h"
-
 
 typedef struct { const char* name; size_t stack_offset; } Variable; DECLARE_HASHMAP_TYPE(Variable, const char*)
 typedef struct { const char* name; VariableHashMap vars; } Procedure; DECLARE_HASHMAP_TYPE(Procedure, const char*)
