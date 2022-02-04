@@ -1,5 +1,6 @@
 proc main()
 {
     var a = 5;
-    return a + 1;
+    var b = a + 1;
+    return a + b;
 }

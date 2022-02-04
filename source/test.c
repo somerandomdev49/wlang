@@ -26,6 +26,17 @@
 #  define WLANG_SYSCALL_EXIT WLANG_SYSCALL__LINUX__EXIT
 #endif
 
+//:==========----------- Pointer Interface Macros -----------==========://
+
+// PIM: Pointer is moved to the target and is owned by it.
+#define PIM_MOVE(X) (X)
+
+// PIM: Pointer is owned by the structure that contains it.
+#define PIM_OWN
+
+// PIM: Pointer is a reference to somewhere.
+#define PIM_REF
+
 //:==========----------- Generic Types -----------==========://
 
 #define LIST(T) T##List
@@ -56,7 +67,7 @@
 #define HASHMAPFN(T, NAME) T##HashMap_##NAME
 #define DECLARE_HASHMAP_TYPE(T, K) \
     typedef struct {\
-        T* data; \
+        PIM_OWN T* data; \
         size_t count; \
     } HASHMAP(T); \
     void HASHMAPFN(T, Initialize)(HASHMAP(T)* self) \
@@ -84,7 +95,7 @@ void CStr_Free(char* s) { free(s); }
 DECLARE_LIST_TYPE(CStr);
 
 typedef struct {
-    char *data;
+    char* data;
     size_t size;
 } DynamicString;
 
@@ -137,7 +148,7 @@ const char* TokenType_ToString(enum TokenType t)
     }
 }
 
-typedef struct { int type; char* value; } Token;
+typedef struct { int type; PIM_OWN char* value; } Token;
 DECLARE_LIST_TYPE(Token);
 
 typedef struct { TokenList tokens; FILE* source; size_t current; } Lexer;
@@ -269,6 +280,9 @@ enum NodeType
     NodeType_Return,
     NodeType_BinOp,
     NodeType_Decl,
+    NodeType_If,
+    NodeType_While,
+    NodeType_FCall,
 };
 
 const char* NodeType_ToString(enum NodeType t)
@@ -285,6 +299,9 @@ const char* NodeType_ToString(enum NodeType t)
     case NodeType_Return: return "Return";
     case NodeType_BinOp: return "Binary Operation";
     case NodeType_Decl: return "Variable Declaration";
+    case NodeType_If: return "If";
+    case NodeType_While: return "While";
+    case NodeType_FCall: return "Function Call";
     default: return "<UNKNOWN>";
     }
 }
@@ -303,6 +320,9 @@ const char* NodeType_ToString2(enum NodeType t)
     case NodeType_Return: return "Return";
     case NodeType_BinOp: return "BinOp";
     case NodeType_Decl: return "Decl";
+    case NodeType_If: return "If";
+    case NodeType_While: return "While";
+    case NodeType_FCall: return "FCall";
     default: return "<UNKNOWN>";
     }
 }
@@ -326,7 +346,7 @@ void AstNode_Proc_Free(AstNode_Proc* n)
     AstNode_FreeAny(n->body);
     ASTNODE_FREE(n);
 }
-AstNode_Proc *AstNode_Proc_Create(char* name, CStrList* args, AstNode* body)
+AstNode_Proc* AstNode_Proc_Create(char* name, CStrList* args, AstNode* body)
 {
     ASTNODE_ALLOC(n, AstNode_Proc, NodeType_Proc);
     n->name = AllocStringCopy(name);
@@ -338,7 +358,7 @@ AstNode_Proc *AstNode_Proc_Create(char* name, CStrList* args, AstNode* body)
 
 typedef struct { AstNode node; char* iden; } AstNode_Iden;
 void AstNode_Iden_Free(AstNode_Iden* n) { free(n->iden); ASTNODE_FREE(n); }
-AstNode_Iden *AstNode_Iden_Create(char* iden)
+AstNode_Iden* AstNode_Iden_Create(char* iden)
 {
     ASTNODE_ALLOC(n, AstNode_Iden, NodeType_Iden);
     n->iden = AllocStringCopy(iden);
@@ -347,7 +367,7 @@ AstNode_Iden *AstNode_Iden_Create(char* iden)
 
 typedef struct { AstNode node; char* name; AstNode* value; } AstNode_Decl;
 void AstNode_Decl_Free(AstNode_Decl* n) { free(n->name); ASTNODE_FREE(n); }
-AstNode_Decl *AstNode_Decl_Create(char* name, AstNode* default_value)
+AstNode_Decl* AstNode_Decl_Create(char* name, AstNode* default_value)
 {
     ASTNODE_ALLOC(n, AstNode_Decl, NodeType_Decl);
     n->name = AllocStringCopy(name);
@@ -357,7 +377,7 @@ AstNode_Decl *AstNode_Decl_Create(char* name, AstNode* default_value)
 
 typedef struct { AstNode node; long value; } AstNode_Int;
 void AstNode_Int_Free(AstNode_Int* n) { ASTNODE_FREE(n); }
-AstNode_Int *AstNode_Int_Create(long value)
+AstNode_Int* AstNode_Int_Create(long value)
 {
     ASTNODE_ALLOC(n, AstNode_Int, NodeType_Int);
     n->value = value;
@@ -436,7 +456,7 @@ const char* BinOpType_ToString2(enum BinOpType t)
 
 typedef struct { AstNode node; enum BinOpType type; AstNode* left; AstNode* right; } AstNode_BinOp;
 void AstNode_BinOp_Free(AstNode_BinOp* n) { AstNode_FreeAny(n->left); AstNode_FreeAny(n->right); ASTNODE_FREE(n); }
-AstNode_BinOp *AstNode_BinOp_Create(enum BinOpType type, AstNode* left, AstNode* right)
+AstNode_BinOp* AstNode_BinOp_Create(enum BinOpType type, AstNode* left, AstNode* right)
 {
     ASTNODE_ALLOC(n, AstNode_BinOp, NodeType_BinOp);
     n->type = type;
@@ -449,7 +469,7 @@ typedef struct { AstNode node; float value; } AstNode_Float;
 typedef struct { AstNode node; char* value; } AstNode_StringLit;
 typedef struct { AstNode node; AstNodePtrList nodes; } AstNode_Block;
 void AstNode_Block_Free(AstNode_Block* n) { AstNodePtrList_ForEach(&n->nodes, &AstNode_FreeAny); ASTNODE_FREE(n); }
-AstNode_Block *AstNode_Block_Create(AstNodePtrList* nodes) // NOTE: This list is moved to the node.
+AstNode_Block* AstNode_Block_Create(AstNodePtrList* nodes) // NOTE: This list is moved to the node.
 {
     ASTNODE_ALLOC(n, AstNode_Block, NodeType_Block);
     n->nodes.data = nodes->data;
@@ -459,10 +479,28 @@ AstNode_Block *AstNode_Block_Create(AstNodePtrList* nodes) // NOTE: This list is
 
 typedef struct { AstNode node; AstNode* value; } AstNode_Return;
 void AstNode_Return_Free(AstNode_Return* n) { AstNode_FreeAny(n->value); ASTNODE_FREE(n); }
-AstNode_Return *AstNode_Return_Create(AstNode* value)
+AstNode_Return* AstNode_Return_Create(AstNode* value)
 {
     ASTNODE_ALLOC(n, AstNode_Return, NodeType_Return);
     n->value = value;
+    return n;
+}
+
+typedef struct { AstNode node; PIM_OWN AstNode* cond, * body, * othr; } AstNode_If;
+void AstNode_If_Free(AstNode_If* n)
+{
+    AstNode_FreeAny(n->cond);
+    AstNode_FreeAny(n->body);
+    if(n->othr) AstNode_FreeAny(n->othr);
+    ASTNODE_FREE(n);
+}
+
+AstNode_If* AstNode_If_Create(AstNode* cond, AstNode* body, AstNode* othr)
+{
+    ASTNODE_ALLOC(n, AstNode_If, NodeType_If);
+    n->cond = cond;
+    n->body = body;
+    n->othr = othr;
     return n;
 }
 
@@ -481,6 +519,9 @@ void AstNode_FreeAny(AstNode* node)
     case NodeType_Block: AstNode_Block_Free((AstNode_Block*)node); break;
     case NodeType_Decl: AstNode_Decl_Free((AstNode_Decl*)node); break;
     case NodeType_BinOp: AstNode_BinOp_Free((AstNode_BinOp*)node); break;
+    case NodeType_If: AstNode_If_Free((AstNode_If*)node); break;
+    // TODO: case NodeType_While: AstNode_While_Free((AstNode_While*)node); break;
+    // TODO: case NodeType_FCall: AstNode_FCall_Free((AstNode_FCall*)node); break;
     default: break;
     }
 }
@@ -660,7 +701,22 @@ AstNode* Parser_ParseStatement(Parser* self)
         while(!Parser__Is(self, '}'))
             AstNodePtrList_PushValue(&stmts, Parser_ParseStatement(self));
         Lexer_Next(self->l);
-        return (AstNode*)AstNode_Block_Create(&stmts);
+        return (AstNode*)AstNode_Block_Create(PIM_MOVE(&stmts));
+    }
+    else if(Parser__IsKeyword(self, "if"))
+    {
+        Lexer_Next(self->l);
+        Parser__ExpectAndMove(self, '(');
+        AstNode* cond = Parser_ParseExpression(self);
+        Parser__ExpectAndMove(self, ')');
+        AstNode* body = Parser_ParseStatement(self);
+        AstNode* othr = NULL;
+        if(Parser__IsKeyword(self, "else"))
+        {
+            Lexer_Next(self->l);
+            othr = Parser_ParseStatement(self);
+        }
+        return (AstNode*)AstNode_If_Create(cond, body, othr);
     }
     else if(Lexer_Peek(self->l)->type == TokenType_Iden && Lexer_PeekN(self->l, 2)->type == TokenType_Iden)
     {
@@ -1144,9 +1200,71 @@ const char* Register__32(const char* regstr)
     return NULL;
 }
 
+typedef struct { char* line; int indent; } AssemblyLine;
+void AssemblyLine_Initialize(AssemblyLine* self, int indent)
+{
+    self->line = NULL;
+    self->indent = indent;
+}
+void AssemblyLine_Free(AssemblyLine* self)
+{
+    if(self->line) free(self->line);
+}
+
+DECLARE_LIST_TYPE(AssemblyLine) 
+
 typedef struct
 {
-    FILE* output;
+    FILE* target;
+    AssemblyLineList lines;
+    int tab_width;
+} AssemblyOutput;
+
+void AssemblyOutput_Initialize(AssemblyOutput* self, FILE* target)
+{
+    AssemblyLineList_Initialize(&self->lines);
+    self->target = target;
+}
+
+void AssemblyOutput_Free(AssemblyOutput* self)
+{
+    AssemblyLineList_ForEachRef(&self->lines, &AssemblyLine_Free);
+    AssemblyLineList_Free(&self->lines);
+    self->target = NULL;
+}
+
+void AssemblyOutput_NewLine(AssemblyOutput* self, int indent)
+{
+    AssemblyLine nl;
+    AssemblyLine_Initialize(&nl, indent);
+    AssemblyLineList_PushRef(&self->lines, PIM_MOVE(&nl));
+}
+
+AssemblyLine* AssemblyOutput_Line(AssemblyOutput* self)
+{
+    return &self->lines.data[self->lines.count - 1];
+}
+
+void AssemblyOutput__FlushLine(AssemblyOutput* self, AssemblyLine* line)
+{
+    if(!line) return;
+
+    for(int i = 0; i < line->indent * self->tab_width; ++i)
+        fputc(' ', self->target);
+    
+    if(line->line)
+        fprintf(self->target, "%s\n", line->line);
+}
+
+void AssemblyOutput_Flush(AssemblyOutput* self)
+{
+    for(size_t i = 0; i < self->lines.count; ++i)
+        AssemblyOutput__FlushLine(self, &self->lines.data[i]);
+}
+
+typedef struct
+{
+    AssemblyOutput output; // TODO: Reduce the size of this structure!!
     int indent, tab_width;
 
     char* pref_out_reg;
@@ -1154,6 +1272,7 @@ typedef struct
     size_t last_stack_offset;
     bool used_regs[Register__Last];
     bool ret_written;
+    int label_no;
 
     ProcedureHashMap procs;
     Procedure* current_proc; // TODO: VariableContext stack
@@ -1163,17 +1282,28 @@ bool Compiler_IsDebug = false;
 void Compiler_Initialize(Compiler* self, const char* filename)
 {
     // printf("Compiler_IsDebug = %s\n", Compiler_IsDebug ? "yes" : "no");
-    self->output = Compiler_IsDebug ? stderr : fopen(filename, "w");
+    AssemblyOutput_Initialize(&self->output, Compiler_IsDebug ? stderr : fopen(filename, "w"));
     self->indent = 0;
-    self->tab_width = 4;
+    self->tab_width = self->output.tab_width = 4;
     self->pref_out_reg = Register_ToString[Register_None];
     self->current_proc = NULL;
     self->alloc_ret_reg = false;
     self->last_stack_offset = 8;
     self->ret_written = false;
+    self->label_no = 0;
     memset(self->used_regs, 0, sizeof(bool) * Register__Last);
     ProcedureHashMap_Initialize(&self->procs);
 }
+
+void Compiler_Free(Compiler* self)
+{
+    if(Compiler_IsDebug) // TODO: Better check
+        fclose(self->output.target);
+
+    ProcedureHashMap_Free(&self->procs);
+    AssemblyOutput_Free(&self->output);
+}
+
 
 void Compiler__Error(Compiler* self, const char* msg)
 {
@@ -1186,44 +1316,40 @@ char* Compiler__StackOffsetString(size_t offset)
     snprintf(m, 32, "qword ptr [rbp - %zu]", offset);
     return m;
 }
-
-void Compiler__Indent(Compiler* self)
+void Compiler__WriteIndentV(Compiler* self, int indent, const char *fmt, va_list va)
 {
-    for(int i = 0; i < self->indent * self->tab_width; ++i)
-        fputc(' ', self->output);
-}
+    va_list va2;
+    va_copy(va2, va);
 
-void Compiler__End(Compiler* self) { self->indent--; fputc('\n', self->output); }
-void Compiler__Begin(Compiler* self, const char* fmt, ...)
-{
-    va_list va;
-    va_start(va, fmt);
+    AssemblyOutput_NewLine(&self->output, self->indent);
+    size_t nsz = vsnprintf(NULL, 0, fmt, va);
+    AssemblyOutput_Line(&self->output)->line = malloc(nsz + 1);
+    vsnprintf(AssemblyOutput_Line(&self->output)->line, nsz + 1, fmt, va2);
 
-    Compiler__Indent(self);
-    vfprintf(self->output, fmt, va);
-    fputc('\n', self->output);
-    self->indent++;
-
-    va_end(va);
+    va_end(va2);
 }
 void Compiler__Write(Compiler* self, const char* fmt, ...)
 {
     va_list va;
     va_start(va, fmt);
-
-    Compiler__Indent(self);
-    vfprintf(self->output, fmt, va);
-    fputc('\n', self->output);
-
+    Compiler__WriteIndentV(self, self->indent, fmt, va);
     va_end(va);
 }
 void Compiler__WriteNoIndent(Compiler* self, const char* fmt, ...)
 {
     va_list va;
     va_start(va, fmt);
+    Compiler__WriteIndentV(self, 0, fmt, va);
+    va_end(va);
+}
 
-    vfprintf(self->output, fmt, va);
-    fputc('\n', self->output);
+void Compiler__End(Compiler* self) { self->indent--; }
+void Compiler__Begin(Compiler* self, const char* fmt, ...)
+{
+    va_list va;
+    va_start(va, fmt);
+    Compiler__WriteIndentV(self, self->indent, fmt, va);
+    self->indent++;
 
     va_end(va);
 }
@@ -1325,7 +1451,13 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
                 self->ret_written = false;
                 self->pref_out_reg = Register_ToString[Register_None];
                 Compiler_CompileNode(self, ((AstNode_Block*)node)->nodes.data[i]);
+                // will this work? if(self->ret_written) break;
             }
+        } break;
+        case NodeType_If:
+        {
+
+            Compiler__WriteNoIndent(self, ".L%d", self->label_no);
         } break;
         case NodeType_Int:
         {
@@ -1342,7 +1474,6 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
                 /* offset: */ v_stack_offset
             });
 
-            Compiler__Write(self, "sub rsp, 8");
 
             if(((AstNode_Decl*)node)->value != NULL)
             {
@@ -1350,6 +1481,7 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
                 AstNode_BinOp* s = AstNode_BinOp_Create(BinOpType_Set, (AstNode*)i, ((AstNode_Decl*)node)->value);
                 char* offset_string = Compiler__StackOffsetString(v_stack_offset);
                 Compiler_CompileNode(self, (AstNode*)s);
+                Compiler__Write(self, "sub rsp, 8"); // Because and 'push' instruction will overwrite.
                 Compiler__Write(self, "mov %s, rax", offset_string);
 
                 free(offset_string);
@@ -1398,18 +1530,15 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
         } break;
         case NodeType_Return:
         {
+            // Value already in RAX.
             Compiler_CompileNode(self, ((AstNode_Return*)node)->value);
+            Compiler__Write(self, "mov rsp, rbp");
             Compiler__Write(self, "pop rbp");
             Compiler__Write(self, "ret");
             self->ret_written = true;
         } break;
         default: Compiler__Write(self, "# Did not compile node of type %s.", NodeType_ToString2(node->type)); break;
     }
-}
-
-void Compiler_Free(Compiler* self)
-{
-    fclose(self->output);
 }
 
 int System_Format(const char* format, ...)
@@ -1433,15 +1562,10 @@ int Command_Assembler(const char* input_name, const char* output_name)
     return System_Format("as %s %s -o %s", Compiler_SaveDebugData ? "-g" : "", input_name, output_name);
 }
 
-const char* MACOS_LINKER_COMMAND =
-    "ld %s -o %s -e _start -static -macosx_version_min 10.13";
-const char* LINUX_LINKER_COMMAND =
-    "ld %s -o %s -e _start -static";
-
 #ifdef __APPLE__
-#define LINKER_COMMAND_FMT MACOS_LINKER_COMMAND
+#define LINKER_COMMAND_FMT "ld %s -o %s -e _start -static -macosx_version_min 10.13"
 #else
-#define LINKER_COMMAND_FMT LINUX_LINKER_COMMAND
+#define LINKER_COMMAND_FMT "ld %s -o %s -e _start -static"
 #endif
 
 int Command_Linker(const char* input_name, const char* output_name)
@@ -1519,6 +1643,8 @@ int Compile(const char* input_file, const char* output_file)
 
     Compiler_WriteHeaders(&compiler);
     Compiler_CompileNode(&compiler, parser.root);
+
+    AssemblyOutput_Flush(&compiler.output);
     Compiler_Free(&compiler);
 
     Parser_Free(&parser);
