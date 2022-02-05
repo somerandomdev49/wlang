@@ -1,8 +1,0 @@
-Procedure: "main", 0 args.
-  Block: 2 statements:
-    Node: Variable Declaration
-    Return:
-      BinOp: Add
-        Identifier: 'a'
-        Integer: 1
-

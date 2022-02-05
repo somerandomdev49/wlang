@@ -1279,10 +1279,10 @@ typedef struct
 } Compiler;
 bool Compiler_IsDebug = false;
 
-void Compiler_Initialize(Compiler* self, const char* filename)
+void Compiler_Initialize(Compiler* self, FILE* output)
 {
     // printf("Compiler_IsDebug = %s\n", Compiler_IsDebug ? "yes" : "no");
-    AssemblyOutput_Initialize(&self->output, Compiler_IsDebug ? stderr : fopen(filename, "w"));
+    AssemblyOutput_Initialize(&self->output, output);
     self->indent = 0;
     self->tab_width = self->output.tab_width = 4;
     self->pref_out_reg = Register_ToString[Register_None];
@@ -1297,9 +1297,6 @@ void Compiler_Initialize(Compiler* self, const char* filename)
 
 void Compiler_Free(Compiler* self)
 {
-    if(Compiler_IsDebug) // TODO: Better check
-        fclose(self->output.target);
-
     ProcedureHashMap_Free(&self->procs);
     AssemblyOutput_Free(&self->output);
 }
@@ -1316,17 +1313,18 @@ char* Compiler__StackOffsetString(size_t offset)
     snprintf(m, 32, "qword ptr [rbp - %zu]", offset);
     return m;
 }
-void Compiler__WriteIndentV(Compiler* self, int indent, const char *fmt, va_list va)
+AssemblyLine* Compiler__WriteIndentV(Compiler* self, int indent, const char *fmt, va_list va)
 {
     va_list va2;
     va_copy(va2, va);
 
-    AssemblyOutput_NewLine(&self->output, self->indent);
+    AssemblyOutput_NewLine(&self->output, indent);
     size_t nsz = vsnprintf(NULL, 0, fmt, va);
     AssemblyOutput_Line(&self->output)->line = malloc(nsz + 1);
     vsnprintf(AssemblyOutput_Line(&self->output)->line, nsz + 1, fmt, va2);
 
     va_end(va2);
+    return AssemblyOutput_Line(&self->output);
 }
 void Compiler__Write(Compiler* self, const char* fmt, ...)
 {
@@ -1456,8 +1454,26 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
         } break;
         case NodeType_If:
         {
+            AstNode_If* n = (AstNode_If*)node;
+            Compiler_CompileNode(self, n->cond);
+            Compiler__Write(self, "cmp rax, 0");
 
-            Compiler__WriteNoIndent(self, ".L%d", self->label_no);
+            int label_exit = self->label_no++;
+            int label_else = n->othr ? self->label_no++ : label_exit;
+
+            Compiler__Write(self, "je .L%d", label_else);
+            Compiler_CompileNode(self, n->body);
+
+            if(n->othr)
+            {
+                // We don't need to jump if there is no else branch
+                Compiler__Write(self, "jmp .L%d", label_exit);
+
+                Compiler__WriteNoIndent(self, ".L%d:", label_else);
+                Compiler_CompileNode(self, n->othr);
+            }
+            
+            Compiler__WriteNoIndent(self, ".L%d:", label_exit);
         } break;
         case NodeType_Int:
         {
@@ -1541,6 +1557,12 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
     }
 }
 
+int System(const char *cmd)
+{
+    printf("system: %s\n", cmd);
+    return system(cmd);
+}
+
 int System_Format(const char* format, ...)
 {
     va_list va;
@@ -1548,7 +1570,7 @@ int System_Format(const char* format, ...)
     char* s = malloc(256);
 
     vsnprintf(s, 256, format, va);
-    int ret = system(s);
+    int ret = System(s);
 
     va_end(va);
     free(s);
@@ -1573,10 +1595,13 @@ int Command_Linker(const char* input_name, const char* output_name)
     return System_Format(LINKER_COMMAND_FMT, input_name, output_name);
 }
 
+bool Compiler_DontLink = false;
 int Build(const char* input_name, const char* output_name)
 {
-    char o_file[] = "/tmp/test_assem_out_XXXXXX";
-    mkstemp(o_file);
+    char tmp_file[] = "/tmp/test_assem_out_XXXXXX";
+    mkstemp(tmp_file);
+
+    const char* o_file = Compiler_DontLink ? output_name : tmp_file;
 
     int ret = 0;
     if((ret = Command_Assembler(input_name, o_file)) != 0)
@@ -1585,10 +1610,13 @@ int Build(const char* input_name, const char* output_name)
         return ret;
     }
 
-    if((ret = Command_Linker(o_file, output_name)) != 0)
+    if(!Compiler_DontLink)
     {
-        fprintf(stderr, "\033[0;31mError:\033[0;0m Linker command failed with exit code %d!\n", ret);
-        return ret;
+        if((ret = Command_Linker(o_file, output_name)) != 0)
+        {
+            fprintf(stderr, "\033[0;31mError:\033[0;0m Linker command failed with exit code %d!\n", ret);
+            return ret;
+        }
     }
 
     return 0;
@@ -1599,7 +1627,6 @@ char* Compile_OutputAssemblyFile = NULL;
 
 int Compile(const char* input_file, const char* output_file)
 {
-
     Lexer lexer;
     Lexer_Initialize(&lexer, input_file);
     Lexer_LexFile(&lexer);
@@ -1638,14 +1665,18 @@ int Compile(const char* input_file, const char* output_file)
 
     // IR_Builder_Free(&ir_builder);
 
+    FILE* f = fopen(Compile_OutputAssemblyFile, "w");
+
     Compiler compiler;
-    Compiler_Initialize(&compiler, Compile_OutputAssemblyFile);
+    Compiler_Initialize(&compiler, f);
 
     Compiler_WriteHeaders(&compiler);
     Compiler_CompileNode(&compiler, parser.root);
 
     AssemblyOutput_Flush(&compiler.output);
     Compiler_Free(&compiler);
+
+    fclose(f);
 
     Parser_Free(&parser);
     if(Compiler_IsDebug) return 0;
@@ -1664,6 +1695,7 @@ int CLI(int argc, char* argv[])
         fprintf(stderr, "\t-s <file>\tset output assembly file\n");
         fprintf(stderr, "\t-d\t\tset debug mode\n");
         fprintf(stderr, "\t-g\t\tassemble and link with debug data\n");
+        fprintf(stderr, "\t-c\t\tdo not link, only compile\n");
         return 1;
     }
 
@@ -1679,6 +1711,7 @@ int CLI(int argc, char* argv[])
             switch(last_opt) {
                 case 'd': Compiler_IsDebug = true; break;
                 case 'g': Compiler_SaveDebugData = true; break;
+                case 'c': Compiler_DontLink = true; break;
                 default: break;
             }
         }
