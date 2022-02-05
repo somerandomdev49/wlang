@@ -1548,6 +1548,7 @@ int System_Format(const char* format, ...)
     char* s = malloc(256);
 
     vsnprintf(s, 256, format, va);
+    printf("SYSTEM: %s\n", s);
     int ret = system(s);
 
     va_end(va);
