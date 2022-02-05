@@ -763,47 +763,72 @@ AstNode_Proc* Parser_ParseProc(Parser* self)
     return AstNode_Proc_Create(name, &args, body);
 }
 
-void AstNode_Show(AstNode* node, int indent);
-void AstNode_Proc_Show(AstNode_Proc* node, int indent) {
+void AstNode_Show(const AstNode* node, int indent);
+void AstNode_Proc_Show(const AstNode_Proc* node, int indent) {
     printf("Procedure: \"%s\", %ld args.\n", node->name, node->args.count);
     AstNode_Show(node->body, indent + 1);
 }
-void AstNode_Int_Show(AstNode_Int* node, int indent) {
+void AstNode_Int_Show(const AstNode_Int* node, int indent) {
     printf("Integer: %ld\n", node->value);
 }
-void AstNode_Iden_Show(AstNode_Iden* node, int indent) {
+void AstNode_Iden_Show(const AstNode_Iden* node, int indent) {
     printf("Identifier: '%s'\n", node->iden);
 }
-void AstNode_Return_Show(AstNode_Return* node, int indent) {
+void AstNode_Return_Show(const AstNode_Return* node, int indent) {
     printf("Return:\n");
     AstNode_Show(node->value, indent + 1);
 }
-void AstNode_BinOp_Show(AstNode_BinOp* node, int indent) {
+void AstNode_BinOp_Show(const AstNode_BinOp* node, int indent) {
     printf("BinOp: %s\n", BinOpType_ToString2(node->type));
     AstNode_Show(node->left, indent + 1);
     AstNode_Show(node->right, indent + 1);
 }
-void AstNode_Block_Show(AstNode_Block* node, int indent) {
+void AstNode_Block_Show(const AstNode_Block* node, int indent) {
     printf("Block: %ld statements:\n", node->nodes.count);
     for(size_t i = 0; i < node->nodes.count; ++i)
         AstNode_Show(node->nodes.data[i], indent + 1);
 }
+void AstNode_Decl_Show(const AstNode_Decl* node, int indent)
+{
+    printf("Variable %s", node->name);
+    if(node->value) printf(" =");
+    putc('\n', stdout);
+    if(node->value) AstNode_Show(node->value, indent + 1);
+}
+void AstNode_If_Show(const AstNode_If* node, int indent)
+{
+    printf("If:\n");
+    for(int i = -2; i < indent * 2; ++i) fputc(' ', stdout);
+    printf("Cond:\n");
+    AstNode_Show(node->cond, indent + 2);
+    for(int i = -2; i < indent * 2; ++i) fputc(' ', stdout);
+    printf("Body:\n");
+    AstNode_Show(node->body, indent + 2);
+    if(node->othr)
+    {
+        for(int i = -2; i < indent * 2; ++i) fputc(' ', stdout);
+        printf("Else:\n");
+        AstNode_Show(node->othr, indent + 2);
+    }
+}
 
-void AstNode_Show(AstNode* node, int indent)
+void AstNode_Show(const AstNode* node, int indent)
 {
     for(int i = 0; i < indent * 2; ++i) fputc(' ', stdout);
     if(!node) { printf("NULL\n"); return; }
     switch(node->type)
     {
     // case NodeType_Error: AstNode_Error_Free(node); break;
-    case NodeType_Proc: AstNode_Proc_Show((AstNode_Proc*)node, indent); break;
-    case NodeType_Iden: AstNode_Iden_Show((AstNode_Iden*)node, indent); break;
-    case NodeType_Int: AstNode_Int_Show((AstNode_Int*)node, indent); break;
+    case NodeType_Proc: AstNode_Proc_Show((const AstNode_Proc*)node, indent); break;
+    case NodeType_Iden: AstNode_Iden_Show((const AstNode_Iden*)node, indent); break;
+    case NodeType_Int: AstNode_Int_Show((const AstNode_Int*)node, indent); break;
     // case NodeType_Float: AstNode_Float_Free(node); break;
     // case NodeType_StringLit: AstNode_StringLit_Free(node); break;
-    case NodeType_Return: AstNode_Return_Show((AstNode_Return*)node, indent); break;
-    case NodeType_Block: AstNode_Block_Show((AstNode_Block*)node, indent); break;
-    case NodeType_BinOp: AstNode_BinOp_Show((AstNode_BinOp*)node, indent); break;
+    case NodeType_Return: AstNode_Return_Show((const AstNode_Return*)node, indent); break;
+    case NodeType_Block: AstNode_Block_Show((const AstNode_Block*)node, indent); break;
+    case NodeType_BinOp: AstNode_BinOp_Show((const AstNode_BinOp*)node, indent); break;
+    case NodeType_If: AstNode_If_Show((const AstNode_If*)node, indent); break;
+    case NodeType_Decl: AstNode_Decl_Show((const AstNode_Decl*)node, indent); break;
     default: printf("Node: %s\n", NodeType_ToString(node->type));break;
     }
 }
@@ -1418,7 +1443,8 @@ bool Compiler__IsAssignable(Compiler* self, const AstNode* node) { return true; 
 
 void Compiler_CompileNode(Compiler* self, const AstNode* node)
 {
-    // Compiler__WriteNoIndent(self, "# Compiling %s", NodeType_ToString(node->type));
+    printf("# Compiling %s\n", NodeType_ToString(node->type));
+    AstNode_Show(node, 0);
     switch(node->type)
     {
         case NodeType_Proc:
@@ -1533,14 +1559,26 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
                     self->pref_out_reg = var_loc;
                     Compiler_CompileNode(self, rhs);
                 } break;
-                case BinOpType_Add:
-                {
-                    Compiler_CompileNode(self, rhs);
-                    Compiler__Write(self, "push rax");
-                    Compiler_CompileNode(self, lhs);
-                    Compiler__Write(self, "pop rbx");
-                    Compiler__Write(self, "add rax, rbx");
-                } break;
+
+#define BIN_IMPL_BASE Compiler_CompileNode(self, rhs); \
+                      Compiler__Write(self, "push rax"); \
+                      Compiler_CompileNode(self, lhs); \
+                      Compiler__Write(self, "pop rbx");
+
+                case BinOpType_Add: { BIN_IMPL_BASE; Compiler__Write(self, "add rax, rbx"); } break;
+                case BinOpType_Sub: { BIN_IMPL_BASE; Compiler__Write(self, "sub rax, rbx"); } break;
+#define BIN_IMPL_BASE_CMP(NAME_STR)  BIN_IMPL_BASE; \
+                                     Compiler__Write(self, "cmp rax, rbx"); \
+                                     Compiler__Write(self, "set" NAME_STR " al"); \
+                                     Compiler__Write(self, "movzx rax, al");
+                                     // ^^ Could have "xor rax, rax" before but GCC uses this so...
+
+                case BinOpType_Lst: { BIN_IMPL_BASE_CMP("l"); } break;
+                case BinOpType_Leq: { BIN_IMPL_BASE_CMP("le"); } break;
+                case BinOpType_Grt: { BIN_IMPL_BASE_CMP("g"); } break;
+                case BinOpType_Geq: { BIN_IMPL_BASE_CMP("ge"); } break;
+#undef BIN_IMPL_BASE_CMP
+#undef BIN_IMPL_BASE
                 default: Compiler__Error(self, "This binary operation is not yet implemented!");
             }
         } break;
@@ -1570,12 +1608,7 @@ int System_Format(const char* format, ...)
     char* s = malloc(256);
 
     vsnprintf(s, 256, format, va);
-<<<<<<< HEAD
-    printf("SYSTEM: %s\n", s);
-    int ret = system(s);
-=======
     int ret = System(s);
->>>>>>> f80962c38b2229ac6e676532471d1b4b8160b881
 
     va_end(va);
     free(s);
