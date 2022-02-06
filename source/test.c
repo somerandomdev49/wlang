@@ -224,7 +224,7 @@ void Lexer_LexFile(Lexer* l)
                 fgetc(l->source);
                 TokenList_PushValue(&l->tokens, (Token){ TokenType_GreaterEqual, NULL });
             }
-            else TokenList_PushValue(&l->tokens, (Token){ '=', NULL });
+            else TokenList_PushValue(&l->tokens, (Token){ '>', NULL });
         }
         else if(fpeekc(l->source) == '<')
         {
@@ -234,7 +234,7 @@ void Lexer_LexFile(Lexer* l)
                 fgetc(l->source);
                 TokenList_PushValue(&l->tokens, (Token){ TokenType_LessEqual, NULL });
             }
-            else TokenList_PushValue(&l->tokens, (Token){ '=', NULL });
+            else TokenList_PushValue(&l->tokens, (Token){ '<', NULL });
         }
         else if(fpeekc(l->source) == '!')
         {
@@ -244,7 +244,7 @@ void Lexer_LexFile(Lexer* l)
                 fgetc(l->source);
                 TokenList_PushValue(&l->tokens, (Token){ TokenType_NotEqual, NULL });
             }
-            else TokenList_PushValue(&l->tokens, (Token){ '=', NULL });
+            else TokenList_PushValue(&l->tokens, (Token){ '!', NULL });
         }
         else TokenList_PushValue(&l->tokens, (Token){ fgetc(l->source), NULL });
     }
@@ -439,7 +439,7 @@ const char* BinOpType_ToString2(enum BinOpType t)
     case BinOpType_Div: return "Divide";
     case BinOpType_Eql: return "Equals";
     case BinOpType_Neq: return "Not Equal";
-    case BinOpType_Grt: return "Greater Then";
+    case BinOpType_Grt: return "Greater Than";
     case BinOpType_Lst: return "Less Than";
     case BinOpType_Geq: return "Greater or Equal";
     case BinOpType_Leq: return "Less or Equal";
@@ -468,7 +468,12 @@ AstNode_BinOp* AstNode_BinOp_Create(enum BinOpType type, AstNode* left, AstNode*
 typedef struct { AstNode node; float value; } AstNode_Float;
 typedef struct { AstNode node; char* value; } AstNode_StringLit;
 typedef struct { AstNode node; AstNodePtrList nodes; } AstNode_Block;
-void AstNode_Block_Free(AstNode_Block* n) { AstNodePtrList_ForEach(&n->nodes, &AstNode_FreeAny); ASTNODE_FREE(n); }
+void AstNode_Block_Free(AstNode_Block* n)
+{
+    AstNodePtrList_ForEach(&n->nodes, &AstNode_FreeAny);
+    AstNodePtrList_Free(&n->nodes);
+    ASTNODE_FREE(n);
+}
 AstNode_Block* AstNode_Block_Create(AstNodePtrList* nodes) // NOTE: This list is moved to the node.
 {
     ASTNODE_ALLOC(n, AstNode_Block, NodeType_Block);
@@ -504,6 +509,24 @@ AstNode_If* AstNode_If_Create(AstNode* cond, AstNode* body, AstNode* othr)
     return n;
 }
 
+typedef struct { AstNode node; AstNode* func; PIM_OWN AstNodePtrList args; } AstNode_FCall;
+void AstNode_FCall_Free(AstNode_FCall* n)
+{
+    AstNode_FreeAny(n->func);
+    AstNodePtrList_ForEach(&n->args, &AstNode_FreeAny);
+    AstNodePtrList_Free(&n->args);
+    ASTNODE_FREE(n);
+}
+
+AstNode_FCall* AstNode_FCall_Create(AstNode* func, AstNodePtrList* args)
+{
+    ASTNODE_ALLOC(n, AstNode_FCall, NodeType_FCall);
+    n->func = func;
+    n->args.count = args->count;
+    n->args.data = args->data;
+    return n;
+}
+
 void AstNode_FreeAny(AstNode* node)
 {
     if(!node) return;
@@ -520,6 +543,7 @@ void AstNode_FreeAny(AstNode* node)
     case NodeType_Decl: AstNode_Decl_Free((AstNode_Decl*)node); break;
     case NodeType_BinOp: AstNode_BinOp_Free((AstNode_BinOp*)node); break;
     case NodeType_If: AstNode_If_Free((AstNode_If*)node); break;
+    case NodeType_FCall: AstNode_FCall_Free((AstNode_FCall*)node); break;
     // TODO: case NodeType_While: AstNode_While_Free((AstNode_While*)node); break;
     // TODO: case NodeType_FCall: AstNode_FCall_Free((AstNode_FCall*)node); break;
     default: break;
@@ -658,6 +682,42 @@ AstNode* Parser_ParseEx_Atom(Parser* self)
     }
 }
 
+AstNode* Parser_ParseEx_Unr(Parser* self)
+{
+    int unop_type = 0;
+    /**/ if(Lexer_Peek(self->l)->type == '-')
+    {
+        unop_type = '-';
+        fprintf(stderr, "Unary operators are not yet implemented.");
+        return NULL;
+    }
+    else if(Lexer_Peek(self->l)->type == '!')
+    {
+        unop_type = '!';
+        fprintf(stderr, "Unary operators are not yet implemented.");
+        return NULL;
+    }
+
+    AstNode* node = Parser_ParseEx_Atom(self);
+
+    if(Lexer_Peek(self->l)->type == '(')
+    {
+        AstNodePtrList nodes;
+        AstNodePtrList_Initialize(&nodes);
+        do
+        {
+            Lexer_Next(self->l);
+            if(Lexer_Peek(self->l)->type == ')') break;
+            AstNodePtrList_PushValue(&nodes, Parser_ParseExpression(self));
+        }
+        while(Lexer_Peek(self->l)->type != ')' && Lexer_Peek(self->l)->type == ',');
+        Lexer_Next(self->l);
+        return (AstNode*)AstNode_FCall_Create(node, PIM_MOVE(&nodes));
+    }
+
+    return node;
+}
+
 #define DECLARE_PARSER_BIN_EXPR_FN(NAME, BEFORE, TYPE, TEST) \
     AstNode* Parser_ParseEx_##NAME(Parser* self) \
     { AstNode* n = Parser_ParseEx_##BEFORE(self); Token* t = Lexer_Peek(self->l); \
@@ -665,7 +725,7 @@ AstNode* Parser_ParseEx_Atom(Parser* self)
       { Lexer_Next(self->l); n = (AstNode*)AstNode_BinOp_Create(TYPE, n, Parser_ParseEx_##BEFORE(self)); } \
       return n; }
 
-DECLARE_PARSER_BIN_EXPR_FN(Mul, Atom, tt == '*' ? BinOpType_Mul : BinOpType_Div, tt == '*' || tt == '/')
+DECLARE_PARSER_BIN_EXPR_FN(Mul, Unr, tt == '*' ? BinOpType_Mul : BinOpType_Div, tt == '*' || tt == '/')
 DECLARE_PARSER_BIN_EXPR_FN(Add, Mul, tt == '+' ? BinOpType_Add : BinOpType_Sub, tt == '+' || tt == '-')
 DECLARE_PARSER_BIN_EXPR_FN(Cmp, Add, tt == '>' ? BinOpType_Grt : BinOpType_Lst, tt == '>' || tt == '<')
 DECLARE_PARSER_BIN_EXPR_FN(Ceq, Cmp,
@@ -787,6 +847,14 @@ void AstNode_Block_Show(const AstNode_Block* node, int indent) {
     printf("Block: %ld statements:\n", node->nodes.count);
     for(size_t i = 0; i < node->nodes.count; ++i)
         AstNode_Show(node->nodes.data[i], indent + 1);
+}
+void AstNode_FCall_Show(const AstNode_FCall* node, int indent) {
+    printf("FCall: %ld arguments\n", node->args.count);
+    AstNode_Show(node->func, indent + 1);
+    for(int i = -2; i < indent * 2; ++i) fputc(' ', stdout);
+    printf("Arguments:\n");
+    for(size_t i = 0; i < node->args.count; ++i)
+        AstNode_Show(node->args.data[i], indent + 1);
 }
 void AstNode_Decl_Show(const AstNode_Decl* node, int indent)
 {
@@ -1443,8 +1511,8 @@ bool Compiler__IsAssignable(Compiler* self, const AstNode* node) { return true; 
 
 void Compiler_CompileNode(Compiler* self, const AstNode* node)
 {
-    printf("# Compiling %s\n", NodeType_ToString(node->type));
-    AstNode_Show(node, 0);
+    // printf("# Compiling %s\n", NodeType_ToString(node->type));
+    // AstNode_Show(node, 0);
     switch(node->type)
     {
         case NodeType_Proc:
@@ -1477,6 +1545,10 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
                 Compiler_CompileNode(self, ((AstNode_Block*)node)->nodes.data[i]);
                 // will this work? if(self->ret_written) break;
             }
+        } break;
+        case NodeType_FCall:
+        {
+            
         } break;
         case NodeType_If:
         {
