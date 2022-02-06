@@ -4,11 +4,12 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdbool.h>
-#include "util.h"
-#include "pim.h"
-#include "type.h"
-#include "ir.h"
-#include "arch/x86_64/arch.h" // Unused?
+#include <wlang/util.h>
+#include <wlang/pim.h>
+#include <wlang/type.h>
+#include <wlang/ir.h>
+#include <wlang/arch/gen.h> // Unused?
+#include <wlang/arch/x86_64/arch.h> // Unused?
 
 //:==========----------- Target-Specific Macros -----------==========://
 
@@ -879,84 +880,17 @@ void Procedure_Initialize(Procedure* self, const char* name)
 //     return NULL;
 // }
 
-typedef struct { char* line; int indent; } AssemblyLine;
-void AssemblyLine_Initialize(AssemblyLine* self, int indent)
-{
-    self->line = NULL;
-    self->indent = indent;
-}
-void AssemblyLine_Free(AssemblyLine* self)
-{
-    if(self->line) free(self->line);
-}
-
-DECLARE_LIST_TYPE(AssemblyLine)
-DEFINE_LIST_TYPE(AssemblyLine)
 
 typedef struct
 {
-    FILE* target;
-    AssemblyLineList lines;
-    int tab_width;
-} AssemblyOutput;
-
-void AssemblyOutput_Initialize(AssemblyOutput* self, FILE* target)
-{
-    AssemblyLineList_Initialize(&self->lines);
-    self->target = target;
-}
-
-void AssemblyOutput_Free(AssemblyOutput* self)
-{
-    AssemblyLineList_ForEachRef(&self->lines, &AssemblyLine_Free);
-    AssemblyLineList_Free(&self->lines);
-    self->target = NULL;
-}
-
-void AssemblyOutput_NewLine(AssemblyOutput* self, int indent)
-{
-    AssemblyLine nl;
-    AssemblyLine_Initialize(&nl, indent);
-    AssemblyLineList_PushRef(&self->lines, PIM_MOVE(&nl));
-}
-
-AssemblyLine* AssemblyOutput_Line(AssemblyOutput* self)
-{
-    return &self->lines.data[self->lines.count - 1];
-}
-
-void AssemblyOutput__FlushLine(AssemblyOutput* self, AssemblyLine* line)
-{
-    if(!line) return;
-
-    for(int i = 0; i < line->indent * self->tab_width; ++i)
-        fputc(' ', self->target);
-    
-    if(line->line)
-        fprintf(self->target, "%s\n", line->line);
-}
-
-void AssemblyOutput_Flush(AssemblyOutput* self)
-{
-    for(size_t i = 0; i < self->lines.count; ++i)
-        AssemblyOutput__FlushLine(self, &self->lines.data[i]);
-    
-    AssemblyLineList_Free(&self->lines);
-}
-
-typedef struct
-{
-    AssemblyOutput output; // TODO: Reduce the size of this structure!!
-    int indent, tab_width;
-
+    IRGenerator gen;
     char* pref_out_reg;
     bool alloc_ret_reg;
     size_t last_stack_offset;
-    bool used_regs[Register__Last];
     bool ret_written;
     int label_no;
 
-    // ProcedureHashMap procs;
+    ProcedureHashMap procs;
     VariableHashMap globals;
     Procedure* current_proc; // TODO: VariableContext stack
 } Compiler;
@@ -965,23 +899,19 @@ bool Compiler_IsDebug = false;
 void Compiler_Initialize(Compiler* self, FILE* output)
 {
     // printf("Compiler_IsDebug = %s\n", Compiler_IsDebug ? "yes" : "no");
-    AssemblyOutput_Initialize(&self->output, output);
-    self->indent = 0;
-    self->tab_width = self->output.tab_width = 4;
-    self->pref_out_reg = Register_ToString[Register_None];
+    IR_Output_Initialize(&self->gen);
     self->current_proc = NULL;
     self->alloc_ret_reg = false;
     self->last_stack_offset = 8;
     self->ret_written = false;
     self->label_no = 0;
-    memset(self->used_regs, 0, sizeof(bool) * Register__Last);
     ProcedureHashMap_Initialize(&self->procs);
 }
 
 void Compiler_Free(Compiler* self)
 {
     ProcedureHashMap_Free(&self->procs);
-    AssemblyOutput_Free(&self->output);
+    IR_Output_Free(&self->gen);
 }
 
 
@@ -990,112 +920,7 @@ void Compiler__Error(Compiler* self, const char* msg)
     fprintf(stderr, "\033[0;31mError:\033[0;0m %s\n", msg);
 }
 
-char* Compiler__StackOffsetString(size_t offset)
-{
-    char* m = malloc(32);
-    snprintf(m, 32, "qword ptr [rbp - %zu]", offset);
-    return m;
-}
-AssemblyLine* Compiler__WriteIndentV(Compiler* self, int indent, const char *fmt, va_list va)
-{
-    va_list va2;
-    va_copy(va2, va);
 
-    AssemblyOutput_NewLine(&self->output, indent);
-    size_t nsz = vsnprintf(NULL, 0, fmt, va);
-    AssemblyOutput_Line(&self->output)->line = malloc(nsz + 1);
-    vsnprintf(AssemblyOutput_Line(&self->output)->line, nsz + 1, fmt, va2);
-
-    va_end(va2);
-    return AssemblyOutput_Line(&self->output);
-}
-void Compiler__Write(Compiler* self, const char* fmt, ...)
-{
-    va_list va;
-    va_start(va, fmt);
-    Compiler__WriteIndentV(self, self->indent, fmt, va);
-    va_end(va);
-}
-void Compiler__WriteNoIndent(Compiler* self, const char* fmt, ...)
-{
-    va_list va;
-    va_start(va, fmt);
-    Compiler__WriteIndentV(self, 0, fmt, va);
-    va_end(va);
-}
-
-void Compiler__End(Compiler* self) { self->indent--; }
-void Compiler__Begin(Compiler* self, const char* fmt, ...)
-{
-    va_list va;
-    va_start(va, fmt);
-    Compiler__WriteIndentV(self, self->indent, fmt, va);
-    self->indent++;
-
-    va_end(va);
-}
-
-enum Register Compiler__FirstFreeReg(Compiler* self)
-{
-    for(int i = 1; i < Register__Last; ++i)
-        if(!self->used_regs[i]) return i;
-    return 0;
-}
-
-enum Register Compiler__PrefOutRegEnum(Compiler* self)
-{
-    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
-        ? Compiler__FirstFreeReg(self)
-        : Register_None;
-}
-
-
-char* Compiler__PrefOutReg(Compiler* self)
-{
-    return StringEqual(self->pref_out_reg, Register_ToString[Register_None])
-        ? Register_ToString[Compiler__FirstFreeReg(self)]
-        : self->pref_out_reg;
-}
-
-void Compiler__WriteBinInstr(Compiler* self, const char* ins, const char* dst, const char* src)
-{
-    if(StringEqual(dst, src)) return;
-    if(StringStartsWith(dst, "qword ptr") && StringStartsWith(src, "qword ptr"))
-    {
-        enum Register r = Compiler__FirstFreeReg(self);
-        Compiler__Write(self, "%s %s, %s", ins, Register_ToString[r], src);
-        Compiler__Write(self, "%s %s, %s", ins, dst, Register_ToString[r]);
-    }
-    else
-    {
-        Compiler__Write(self, "%s %s, %s", ins, dst, src);
-    }
-}
-
-// ??
-void Compiler__WriteSyscall_Exit(Compiler* self, char* retcode)
-{
-#if WLANG_TARGET == WLANG_TARGET_DARWIN
-    // if(!StringEqual(retcode, "ebx") && !StringEqual(retcode, "rbx")) Compiler__Write(self, "mov ebx, %s", Register__32(retcode));
-    Compiler__Write(self, "mov eax, 0x%x", WLANG_SYSCALL__DARWIN__EXIT);
-    Compiler__Write(self, "syscall");
-#elif WLANG_TARGET == WLANG_TARGET_LINUX
-    Compiler__WriteBinInstr(self, "mov", "rdi", retcode);
-    Compiler__Write(self, "mov eax, 0x%x", WLANG_SYSCALL__LINUX__EXIT);
-    Compiler__Write(self, "syscall");
-#endif
-}
-
-void Compiler_WriteHeaders(Compiler* self)
-{
-    Compiler__WriteNoIndent(self, ".intel_syntax noprefix");
-    Compiler__WriteNoIndent(self, ".global _start");
-    Compiler__Begin(self, "_start:");
-        Compiler__Write(self, "call main");
-        Compiler__Write(self, "mov rdi, rax");
-        Compiler__WriteSyscall_Exit(self, "rdi");
-    Compiler__End(self);
-}
 
 bool Compiler__IsAssignable(Compiler* self, const AstNode* node) { return true; }
 
@@ -1104,9 +929,8 @@ static char* Compiler__saved_regs[] = { "rbp", "rbx", /* not used: "r12", "r13",
 // In future, this will be all instructions.
 void Compiler__GenerateReturn(Compiler* self)
 {
-    for(size_t i = sizeof(Compiler__saved_regs) / sizeof(char*); i --> 0;)
-        Compiler__Write(self, "pop %s", Compiler__saved_regs[i]);
-    Compiler__Write(self, "add rsp, %ld", self->current_proc.);
+    // for(size_t i = sizeof(Compiler__saved_regs) / sizeof(char*); i --> 0;)
+    //     Compiler__Write(self, "pop %s", Compiler__saved_regs[i]);
     Compiler__Write(self, "ret");
 }
 
@@ -1145,9 +969,8 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
         {
             for(size_t i = 0; i < ((AstNode_Block*)node)->nodes.count; ++i)
             {
-                self->ret_written = false;
-                self->pref_out_reg = Register_ToString[Register_None];
                 Compiler_CompileNode(self, ((AstNode_Block*)node)->nodes.data[i]);
+                // self->ret_written = false;
                 // will this work? if(self->ret_written) break;
             }
         } break;
@@ -1251,7 +1074,6 @@ void Compiler_CompileNode(Compiler* self, const AstNode* node)
         } break;
         case NodeType_BinOp:
         {
-            char* p = Compiler__PrefOutReg(self); (void)p;
             AstNode* lhs = ((AstNode_BinOp*)node)->left;
             AstNode* rhs = ((AstNode_BinOp*)node)->right;
             switch(((AstNode_BinOp*)node)->type)
