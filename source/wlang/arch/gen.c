@@ -1,4 +1,5 @@
 #include <wlang/arch/gen.h>
+#include <wlang/pim.h>
 
 DEFINE_LIST_TYPE(AssemblyLine)
 

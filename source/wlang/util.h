@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 static inline int fpeekc(FILE* f) { int tmp = fgetc(f); ungetc(tmp, f); return tmp; }
 
